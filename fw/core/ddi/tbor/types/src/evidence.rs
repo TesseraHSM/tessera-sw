@@ -102,17 +102,23 @@ pub const EVIDENCE_CHAIN_MAX_LEN: usize = EVIDENCE_CHAIN_MAX_CERTS * CERT_DESCRI
 const _: () = assert!(EVIDENCE_CHAIN_MAX_LEN == 24);
 const _: () = assert!(REPORT_DESCRIPTOR_LEN == 3);
 
-/// Out-of-band evidence as a reusable TBOR **field group**: the three
-/// certificate-chain descriptor lists plus the attestation-report
-/// descriptor list.  `#[tbor(include)]` it into a command to splice these
-/// four TOC entries into the message.
-///
-/// The bulk bytes (the DER chains and the COSE_Sign1 report) travel **out
-/// of band** as SGL Data Blocks; this group carries only the
-/// `(index, length)` descriptors referencing them.  Each list is a
-/// variable-length typed slice (`&[CertDescriptor]` /
-/// `&[ReportDescriptor]`) — there is no fixed per-chain cap, only the
-/// wire-size [`EVIDENCE_CHAIN_MAX_LEN`] bound (24 B = 8 descriptors).
+/// Source PID identity as three out-of-band certificate-chain lists.
+/// `#[tbor(include)]` splices three TOC entries into a command. The
+/// signature is carried inside the backup, not in this field group.
+#[tbor(fields)]
+pub struct IdentityEvidence<'a> {
+    /// Manufacturer certificate-chain descriptors.
+    #[tbor(buffer, max_len = 24)]
+    pub mfgr_cert_chain: &'a [CertDescriptor],
+    /// Optional device-owner certificate-chain descriptors.
+    #[tbor(buffer, max_len = 24)]
+    pub owner_cert_chain: &'a [CertDescriptor],
+    /// Partition-owner certificate-chain descriptors.
+    #[tbor(buffer, max_len = 24)]
+    pub part_owner_cert_chain: &'a [CertDescriptor],
+}
+
+/// Recipient-key attestation: identity chains plus a PublicKey report.
 #[tbor(fields)]
 pub struct Evidence<'a> {
     /// Manufacturer certificate-chain descriptors.

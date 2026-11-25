@@ -231,20 +231,20 @@ impl HsmAesGcm for StdHsmPal {
     ) -> HsmResult<()> {
         let iv = gcm_iv(iv)?;
         let tag = gcm_tag_mut(tag)?;
-        if aad_len > plaintext.len() || aad_len > ciphertext.len() {
+        if ciphertext.len() < plaintext.len() {
             return Err(HsmError::AesGcmInvalidBufferSize);
         }
-        let aad: Option<&[u8]> = if aad_len > 0 {
-            Some(&plaintext[..aad_len])
-        } else {
-            None
-        };
-        let data: &[u8] = &plaintext[aad_len..];
-        if let Some(aad) = aad {
-            ciphertext[..aad_len].copy_from_slice(aad);
-        }
+        let (aad, offset) = gcm_split_padded(plaintext, aad_len)?;
+        ciphertext[..offset].copy_from_slice(&plaintext[..offset]);
         self.aes
-            .gcm_encrypt(key, iv, aad, data, &mut ciphertext[aad_len..], tag)
+            .gcm_encrypt(
+                key,
+                iv,
+                aad,
+                &plaintext[offset..],
+                &mut ciphertext[offset..plaintext.len()],
+                tag,
+            )
             .await
     }
 
@@ -259,18 +259,10 @@ impl HsmAesGcm for StdHsmPal {
     ) -> HsmResult<()> {
         let iv = gcm_iv(iv)?;
         let tag = gcm_tag_mut(tag)?;
-        if aad_len > data.len() {
-            return Err(HsmError::AesGcmInvalidBufferSize);
-        }
         let input = data.to_vec();
-        let aad = if aad_len > 0 {
-            Some(&input[..aad_len])
-        } else {
-            None
-        };
-        let plaintext = &input[aad_len..];
+        let (aad, offset) = gcm_split_padded(&input, aad_len)?;
         self.aes
-            .gcm_encrypt(key, iv, aad, plaintext, &mut data[aad_len..], tag)
+            .gcm_encrypt(key, iv, aad, &input[offset..], &mut data[offset..], tag)
             .await
     }
 
@@ -286,18 +278,20 @@ impl HsmAesGcm for StdHsmPal {
     ) -> HsmResult<()> {
         let iv = gcm_iv(iv)?;
         let tag = gcm_tag(tag)?;
-        if aad_len > ciphertext.len() || aad_len > plaintext.len() {
+        if plaintext.len() < ciphertext.len() {
             return Err(HsmError::AesGcmInvalidBufferSize);
         }
-        let aad: Option<&[u8]> = if aad_len > 0 {
-            plaintext[..aad_len].copy_from_slice(&ciphertext[..aad_len]);
-            Some(&ciphertext[..aad_len])
-        } else {
-            None
-        };
-        let data: &[u8] = &ciphertext[aad_len..];
+        let (aad, offset) = gcm_split_padded(ciphertext, aad_len)?;
+        plaintext[..offset].copy_from_slice(&ciphertext[..offset]);
         self.aes
-            .gcm_decrypt(key, iv, aad, tag, data, &mut plaintext[aad_len..])
+            .gcm_decrypt(
+                key,
+                iv,
+                aad,
+                tag,
+                &ciphertext[offset..],
+                &mut plaintext[offset..ciphertext.len()],
+            )
             .await
     }
 
@@ -312,18 +306,10 @@ impl HsmAesGcm for StdHsmPal {
     ) -> HsmResult<()> {
         let iv = gcm_iv(iv)?;
         let tag = gcm_tag(tag)?;
-        if aad_len > data.len() {
-            return Err(HsmError::AesGcmInvalidBufferSize);
-        }
         let input = data.to_vec();
-        let aad = if aad_len > 0 {
-            Some(&input[..aad_len])
-        } else {
-            None
-        };
-        let ciphertext = &input[aad_len..];
+        let (aad, offset) = gcm_split_padded(&input, aad_len)?;
         self.aes
-            .gcm_decrypt(key, iv, aad, tag, ciphertext, &mut data[aad_len..])
+            .gcm_decrypt(key, iv, aad, tag, &input[offset..], &mut data[offset..])
             .await
     }
 
@@ -1050,6 +1036,100 @@ mod tests {
         d[..8].copy_from_slice(&(buf.as_ptr() as usize as u64).to_le_bytes());
         d[8..12].copy_from_slice(&(buf.len() as u32).to_le_bytes());
         d
+    }
+
+    #[tokio::test]
+    async fn gcm_dma_methods_use_padded_aad_and_standard_tags() {
+        use tsra_crypto::AesGcmAlgo;
+        use tsra_crypto::AesKey;
+        use tsra_crypto::EncryptOp;
+        use tsra_crypto::ImportableKey;
+
+        let (pal, io) = test_pal();
+        let key_bytes = [0x11; 32];
+        let iv_bytes = [0x22; 12];
+        let key = dma(&pal, &io, &key_bytes);
+        let iv = dma(&pal, &io, &iv_bytes);
+        let text = [0x33; 32];
+        for aad_len in [0usize, 13, 20, 32, 113, 161] {
+            let aad = vec![0x44; aad_len];
+            let padded = aad_len.next_multiple_of(32);
+            let start = if (1..=16).contains(&(aad_len % 32)) {
+                16
+            } else {
+                0
+            };
+            let input = pal
+                .dma_alloc_zeroed(&io, padded + text.len())
+                .expect("input");
+            input[start..start + aad_len].copy_from_slice(&aad);
+            input[padded..].copy_from_slice(&text);
+            let output = pal.dma_alloc(&io, input.len()).expect("ciphertext");
+            let tag = pal.dma_alloc(&io, 16).expect("tag");
+            pal.gcm_encrypt(&io, key, iv, aad_len, input, output, tag)
+                .await
+                .expect("encrypt");
+
+            let reference_key = AesKey::from_bytes(&key_bytes).expect("reference key");
+            let mut reference =
+                AesGcmAlgo::for_encrypt(&iv_bytes, Some(&aad)).expect("reference GCM");
+            let mut expected = [0; 32];
+            reference
+                .encrypt(&reference_key, &text, Some(&mut expected))
+                .expect("reference encrypt");
+            assert_eq!(&output[..padded], &input[..padded]);
+            assert_eq!(output[padded..], expected);
+            assert_eq!(&tag[..], reference.tag());
+
+            let inplace = dma(&pal, &io, input);
+            let inplace_tag = pal.dma_alloc(&io, 16).expect("inplace tag");
+            pal.gcm_encrypt_in_place(&io, key, iv, aad_len, inplace, inplace_tag)
+                .await
+                .expect("inplace encrypt");
+            assert_eq!(&inplace[..], &output[..]);
+            assert_eq!(&inplace_tag[..], &tag[..]);
+
+            let plain = pal.dma_alloc(&io, input.len()).expect("plaintext");
+            pal.gcm_decrypt(&io, key, iv, aad_len, tag, output, plain)
+                .await
+                .expect("decrypt");
+            assert_eq!(&plain[..], &input[..]);
+            pal.gcm_decrypt_in_place(&io, key, iv, aad_len, tag, inplace)
+                .await
+                .expect("inplace decrypt");
+            assert_eq!(&inplace[..], &input[..]);
+            tag[0] ^= 1;
+            assert_eq!(
+                pal.gcm_decrypt(&io, key, iv, aad_len, tag, output, plain)
+                    .await,
+                Err(HsmError::AesGcmDecryptTagDoesNotMatch)
+            );
+
+            let short = pal.dma_alloc(&io, input.len() - 1).expect("short output");
+            assert_eq!(
+                pal.gcm_encrypt(&io, key, iv, aad_len, input, short, inplace_tag)
+                    .await,
+                Err(HsmError::AesGcmInvalidBufferSize)
+            );
+            assert_eq!(
+                pal.gcm_decrypt(&io, key, iv, aad_len, inplace_tag, output, short)
+                    .await,
+                Err(HsmError::AesGcmInvalidBufferSize)
+            );
+        }
+        let malformed = pal.dma_alloc_zeroed(&io, 13).expect("short AAD region");
+        let tag = pal.dma_alloc(&io, 16).expect("tag");
+        assert_eq!(
+            pal.gcm_encrypt_in_place(&io, key, iv, 13, malformed, tag)
+                .await,
+            Err(HsmError::AesGcmInvalidBufferSize)
+        );
+        assert_eq!(
+            pal.gcm_decrypt_in_place(&io, key, iv, 13, tag, malformed)
+                .await,
+            Err(HsmError::AesGcmInvalidBufferSize)
+        );
+        pal.drop_io(io).await.expect("drop IO");
     }
 
     /// GCM spec test case 16 (AES-256, 20-byte AAD, 60-byte text) over

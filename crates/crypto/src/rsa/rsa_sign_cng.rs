@@ -23,6 +23,8 @@
 //! - PKCS#1 v1.5 is deterministic and may be vulnerable to certain attacks
 //! - Always hash messages before signing (this module expects pre-computed digests)
 
+use windows::Win32::Foundation::NTSTATUS;
+use windows::Win32::Foundation::STATUS_INVALID_SIGNATURE;
 use windows::Win32::Security::Cryptography::*;
 
 use super::*;
@@ -181,7 +183,7 @@ impl VerifyOp for CngRsaSignAlgo {
     /// # Arguments
     ///
     /// * `key` - The RSA public key to use for verification
-    /// * `data` - The pre-computed message digest (hash output), must match key size
+    /// * `data` - The pre-computed message digest, sized for the configured hash
     /// * `signature` - The signature to verify
     ///
     /// # Returns
@@ -191,10 +193,10 @@ impl VerifyOp for CngRsaSignAlgo {
     /// # Errors
     ///
     /// Returns `CryptoError::RsaVerifyError` if:
-    /// - The digest size doesn't match the key size
     /// - Internal Windows CNG operations fail
     ///
-    /// Note: Invalid signatures return `Ok(false)`, not an error.
+    /// Note: Invalid signatures and malformed digest lengths return `Ok(false)`,
+    /// not an error.
     #[allow(unsafe_code)]
     fn verify(
         &mut self,
@@ -246,6 +248,18 @@ impl VerifyOp for CngRsaSignAlgo {
             return Ok(constant_time_eq(&recovered, data));
         }
 
+        if data.len() != self.hash.size() || signature.len() != key.size() {
+            return Ok(false);
+        }
+        let mut modulus = vec![0u8; key.size()];
+        key.n(Some(&mut modulus))
+            .map_err(|_| CryptoError::RsaVerifyError)?;
+        // CNG reports an out-of-range signature as STATUS_INVALID_PARAMETER.
+        // Reject it here without hiding operational failures from BCrypt.
+        if signature >= modulus.as_slice() {
+            return Ok(false);
+        }
+
         // SAFETY: Calling Windows CNG BCryptVerifySignature API.
         // - key.handle() is a valid BCRYPT_KEY_HANDLE obtained from a CNG public key object
         //   that remains valid for the lifetime of the key reference
@@ -257,8 +271,16 @@ impl VerifyOp for CngRsaSignAlgo {
         // The function performs read-only operations and returns a status code
         let status =
             unsafe { BCryptVerifySignature(key.handle(), pad_ptr, data, signature, flags) };
-        Ok(status.is_ok())
+        map_verify_status(status)
     }
+}
+
+fn map_verify_status(status: NTSTATUS) -> Result<bool, CryptoError> {
+    if status == STATUS_INVALID_SIGNATURE {
+        return Ok(false);
+    }
+    status.ok().map_err(|_| CryptoError::RsaVerifyError)?;
+    Ok(true)
 }
 
 impl VerifyRecoverOp for CngRsaSignAlgo {
@@ -453,5 +475,54 @@ fn pad_ptr(pad: &PaddingInfo) -> Option<*const std::ffi::c_void> {
         PaddingInfo::None => None,
         PaddingInfo::Pkcs1(info) => Some(info as *const _ as *const std::ffi::c_void),
         PaddingInfo::Pss(info) => Some(info as *const _ as *const std::ffi::c_void),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::Foundation::STATUS_INVALID_PARAMETER;
+    use windows::Win32::Foundation::STATUS_NO_MEMORY;
+    use windows::Win32::Foundation::STATUS_SUCCESS;
+
+    use super::*;
+
+    #[test]
+    fn verify_status_distinguishes_invalid_signature_from_operational_errors() {
+        assert_eq!(map_verify_status(STATUS_SUCCESS), Ok(true));
+        assert_eq!(map_verify_status(STATUS_INVALID_SIGNATURE), Ok(false));
+        for status in [STATUS_INVALID_PARAMETER, STATUS_NO_MEMORY] {
+            assert_eq!(map_verify_status(status), Err(CryptoError::RsaVerifyError));
+        }
+    }
+
+    #[test]
+    fn padded_verify_rejects_malformed_inputs_without_operational_errors() {
+        let private = RsaPrivateKey::generate(256).expect("generate RSA key");
+        let public = private.public_key().expect("public key");
+        let digest = [0xA7u8; 32];
+        let mut modulus = vec![0; public.size()];
+        public.n(Some(&mut modulus)).expect("export modulus");
+        for mut algo in [
+            CngRsaSignAlgo::with_pkcs1_padding(HashAlgo::sha256()),
+            CngRsaSignAlgo::with_pss_padding(HashAlgo::sha256(), 32),
+        ] {
+            let signature = Signer::sign_vec(&mut algo, &private, &digest).expect("sign digest");
+            assert_eq!(algo.verify(&public, &digest, &signature), Ok(true));
+            for bad_digest in [&[][..], &[0xA7; 10][..], &[0xA7; 48][..]] {
+                assert_eq!(algo.verify(&public, bad_digest, &signature), Ok(false));
+            }
+            for invalid_signature in [
+                &[][..],
+                &[0; 255][..],
+                &[0; 256][..],
+                &[0xFF; 256][..],
+                modulus.as_slice(),
+            ] {
+                assert_eq!(algo.verify(&public, &digest, invalid_signature), Ok(false));
+            }
+            let mut corrupted = signature;
+            corrupted[255] ^= 1;
+            assert_eq!(algo.verify(&public, &digest, &corrupted), Ok(false));
+        }
     }
 }

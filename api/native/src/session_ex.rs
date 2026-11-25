@@ -109,8 +109,10 @@ pub unsafe extern "C" fn tsra_sess_ex_open(
 /// @brief Recover a migrated security-domain session in place
 ///
 /// Establishes fresh channel keys while restoring the original session
-/// masking key. Uses the session's existing role and the current role PSK.
-/// Does not replay an interrupted command or reset the PSK-change allowance.
+/// masking key. Uses the session's existing role and the current role PSK,
+/// which a migration returns to its default (pass NULL). Does not replay an
+/// interrupted command; the migration, not the reopen, restores the
+/// PSK-change allowance.
 ///
 /// # Safety
 ///

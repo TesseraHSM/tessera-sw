@@ -3,9 +3,9 @@ Copyright (c) Microsoft Corporation.
 Licensed under the MIT License.
 -->
 
-# MlKemDecapsulate (Opcode 0x2B) — schema-only
+# MlKemDecapsulate (Opcode 0x2B)
 
-**Handler:** _Not implemented yet (wire schema only)_
+**Handler:** `fw/core/lib/src/ddi/tbor/mlkem_decapsulate.rs`
 **Session:** InSession
 
 ## Description
@@ -18,10 +18,12 @@ operation.
 
 There is intentionally no `key_kind` request field. The masked blob is
 self-describing: its authenticated key kind tells firmware which ML-KEM
-parameter set the seed belongs to.
+parameter set the key belongs to.
 
-This snapshot defines only the wire schema; no firmware handler or PQC
-implementation is registered.
+An active session is required. Firmware resolves the input key's masking
+scope from its authenticated metadata and the output masking scope from
+the request. The unmasked payload contains the seed pair followed by the
+expanded decapsulation key; decapsulation uses the expanded key directly.
 
 ## Request
 
@@ -32,16 +34,15 @@ implementation is registered.
 | 12 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
 | 16 | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the returned shared secret. |
 | 20 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 24 | `masked_key` | `buffer` (196 B) | The masked ML-KEM `(d ‖ z)` seed material; unmasked on-device by the future handler.  Seed-only wire: 64-byte seed + 132 B envelope. |
+| 24 | `masked_key` | `buffer` (up to 3464 B) | The complete masked seed-pair and expanded-key blob returned by `MlKemGenerateKey`; unmasked on-device. |
 | 28 | `ciphertext` | `buffer` (up to 1568 B) | ML-KEM ciphertext bytes. |
 
 ### Data section
 
 Carries the masked decapsulation key followed by the ciphertext.
 
-Worst-case frame: data `196 + 1568 = 1764` B; staged `132 + 1764 = 1896`
-B and encoded `4 + 4*4 + 1764 = 1784` B — both well inside the 8192-byte
-transport buffer.
+The largest request carries `3464 + 1568 = 5032` data bytes and fits
+inside the 8192-byte transport buffer with its header, TOC, and padding.
 
 ## Response
 
@@ -50,18 +51,23 @@ transport buffer.
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 12 | (padding) | `padding` (0..=3 B) | Places `masked_shared_secret` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
-| 16 | `masked_shared_secret` | `buffer` (164 B) | The 32-byte shared secret, masked under the requested scope's masking key. |
+| 16 | `masked_shared_secret` | `buffer` (264 B) | The 32-byte shared secret, masked under the requested scope's masking key. |
 
 ### Data section
 
 Carries the masked shared secret.  The masked shared-secret length is
-`32 + 132 = 164` bytes.
+`32 + 232 = 264` bytes.
 
 ## Errors
 
-Handler errors are not defined yet because this command is schema-only.
-The parameter set is recovered from the masked key's authenticated key
-kind, so it is not carried on the wire.
+An unknown or inactive session, unavailable masking scope, malformed or
+unauthentic masked key, unsupported key kind, missing derive permission,
+incorrect key/ciphertext length, or malformed request is rejected.
+
+For a valid key and correctly sized ciphertext, ML-KEM uses implicit
+rejection: an invalid ciphertext produces a derived rejection secret,
+not a signature-style verification error. Backend and output-masking
+failures are still reported.
 
 ## See also
 

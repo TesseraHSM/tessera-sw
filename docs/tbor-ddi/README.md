@@ -11,6 +11,11 @@ For the implemented trust model, complete handshake flows, exact key schedule,
 transport binding, and security limitations, see
 [Tessera Secure Session Implementation](./session-design.md).
 
+For the security-domain transfer migration, see
+[SD HPKE authentication rationale](sd-hpke-pqc-rationale.md), including
+the command-by-command changes from HPKE Auth, security invariants, and
+preparation for post-quantum KEMs.
+
 Per-command documents in [`commands/`](./commands/) describe only the
 request and response **bodies** (the TOC entries that follow the
 shared headers below).  Wire framing, TOC entry layout, alignment, and
@@ -202,7 +207,7 @@ allocation. Errors overwrite the response prefix in the same storage. Every publ
 including padding or gaps, must be initialized; overlapping crypto requires an
 explicitly supported in-place PAL operation.
 
-All 44 commands encode their compact responses directly into this shared
+All commands encode their compact responses directly into this shared
 allocation; there is no legacy dispatch bridge or separately allocated encoded
 response. Existing cryptographic working buffers remain scoped independently.
 Hash consumes the input before reclaiming it for the digest.
@@ -254,7 +259,9 @@ storage is zero.
 | `0x18` | `EccSign` | InSession | [`commands/ecc_sign.md`](./commands/ecc_sign.md) |
 | `0x33` | `EccVerify` | InSession | [`commands/ecc_verify.md`](./commands/ecc_verify.md) |
 | `0x19` | `EcdhDerive` | InSession | [`commands/ecdh_derive.md`](./commands/ecdh_derive.md) |
-| `0x1A` | `RsaModExp` | InSession | [`commands/rsa_mod_exp.md`](./commands/rsa_mod_exp.md) |
+| `0x1A` | `RsaModExp` (raw Decrypt/Sign/Encrypt/Verify) | InSession | [`commands/rsa_mod_exp.md`](./commands/rsa_mod_exp.md) |
+| `0x35` | `RsaSign` | InSession | [`commands/rsa_sign.md`](./commands/rsa_sign.md) |
+| `0x36` | `RsaVerify` | InSession | [`commands/rsa_verify.md`](./commands/rsa_verify.md) |
 | `0x1B` | `Hash` | InSession | [`commands/hash.md`](./commands/hash.md) |
 | `0x1C` | `HkdfDerive` | InSession | [`commands/hkdf_derive.md`](./commands/hkdf_derive.md) |
 | `0x1D` | `ConcatKdfDerive` | InSession | [`commands/concat_kdf_derive.md`](./commands/concat_kdf_derive.md) |
@@ -266,18 +273,20 @@ storage is zero.
 | `0x23` | `DarcTmkGen` | InSession | [`commands/darc_tmk_gen.md`](./commands/darc_tmk_gen.md) |
 | `0x24` | `DarcTmkExport` | InSession | [`commands/darc_tmk_export.md`](./commands/darc_tmk_export.md) |
 | `0x25` | `DarcKeyWrap` | InSession | [`commands/darc_key_wrap.md`](./commands/darc_key_wrap.md) |
-| `0x26` | `MlDsaGenerateKey` | NoSession | [`commands/mldsa_generate_key.md`](./commands/mldsa_generate_key.md) (**schema-only**) |
+| `0x26` | `MlDsaGenerateKey` | InSession | [`commands/mldsa_generate_key.md`](./commands/mldsa_generate_key.md) |
 | `0x27` | `MlDsaSign` | InSession | [`commands/mldsa_sign.md`](./commands/mldsa_sign.md) |
 | `0x28` | `MlDsaVerify` | InSession | [`commands/mldsa_verify.md`](./commands/mldsa_verify.md) |
-| `0x29` | `MlKemGenerateKey` | NoSession | [`commands/mlkem_generate_key.md`](./commands/mlkem_generate_key.md) (**schema-only**) |
-| `0x2A` | `MlKemEncapsulate` | NoSession | [`commands/mlkem_encapsulate.md`](./commands/mlkem_encapsulate.md) (**schema-only**) |
-| `0x2B` | `MlKemDecapsulate` | NoSession | [`commands/mlkem_decapsulate.md`](./commands/mlkem_decapsulate.md) (**schema-only**) |
+| `0x29` | `MlKemGenerateKey` | InSession | [`commands/mlkem_generate_key.md`](./commands/mlkem_generate_key.md) |
+| `0x2A` | `MlKemEncapsulate` | InSession | [`commands/mlkem_encapsulate.md`](./commands/mlkem_encapsulate.md) |
+| `0x2B` | `MlKemDecapsulate` | InSession | [`commands/mlkem_decapsulate.md`](./commands/mlkem_decapsulate.md) |
 | `0x2F` | `GetPublicKey` | InSession | [`commands/get_public_key.md`](./commands/get_public_key.md) |
 | `0x32` | `VerifyKey` | InSession | [`commands/verify_key.md`](./commands/verify_key.md) |
 | `0x34` | `RsaEncryptDecrypt` | InSession | [`commands/rsa_encrypt_decrypt.md`](./commands/rsa_encrypt_decrypt.md) |
+| `0x37` | `EcdsaSign` | InSession | [`commands/ecdsa_sign.md`](./commands/ecdsa_sign.md) |
+| `0x38` | `EcdsaVerify` | InSession | [`commands/ecdsa_verify.md`](./commands/ecdsa_verify.md) |
 
-`0x33` is assigned to `EccVerify`. Opcodes `0x35` and `0x36` are reserved for
-the upcoming `RsaSign` and `RsaVerify` commands.
+`0x33` is assigned to `EccVerify`, `0x35` and `0x36` to `RsaSign` and
+`RsaVerify`, and `0x37` and `0x38` to `EcdsaSign` and `EcdsaVerify`.
 
 ## Default-PSK gate
 
@@ -321,11 +330,16 @@ successful change; further changes return `PskChangeAlreadyUsed`. Failed
 attempts do not consume it, and failed completion rolls back the credential,
 caller binding and bit together. Reopen preserves the consumed bit.
 
-Migration preserves configured CO and CU PSKs, recovery fingerprints and
-logical session reservations. Reopen authenticates with the current role PSK
-using fresh channel keys and restores the original masking key. Explicit
-plaintext close is also permitted for `NeedsRenegotiation` only. Physical
-partition disable/free retains its distinct provisioning reset policy.
+Migration (NSSR) returns the CO and CU PSKs to their defaults and clears every
+slot's consumed bit, as a live-migration target starts with the defaults; it
+preserves recovery fingerprints and logical session reservations. Reopen
+authenticates with the role's default PSK using fresh channel keys and
+restores the original masking key; the reopened session is then held by the
+default-PSK gate until it rotates its role PSK again. Explicit plaintext close
+is also permitted for `NeedsRenegotiation` only. Migration also clears the
+`PartInit` provisioning (policy hash and PTA key), so the host initializes
+the partition again. Physical partition disable/free retains its distinct
+provisioning reset policy.
 
 The gate is **safe-by-default** in code: future opcodes added to the
 dispatcher are gated unless explicitly placed on the

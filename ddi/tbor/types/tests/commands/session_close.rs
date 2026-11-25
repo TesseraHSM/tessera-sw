@@ -17,7 +17,7 @@
 //! methods so they can call close twice, close an unknown id, or
 //! close a pending-only slot.
 //!
-//! Cross-test isolation comes from `open_dev`'s factory-reset; no
+//! Cross-test isolation comes from `open_dev`'s NSSR; no
 //! per-test cleanup is required.
 
 use tsra_ddi_tbor_test_harness::SessionSuite;
@@ -54,7 +54,7 @@ fn session_close_plaintext_after_migration_cannot_close_reused_active_slot() {
     let request = TborSessionClosePlainReq {
         session_id: original.session_id,
     };
-    ctx.migrate().expect("migration");
+    ctx.erase().expect("migration");
     ctx.tbor(&request).expect("plaintext stale close");
     let replacement = ctx
         .open_session(CU, SessionSuite::EcdhP384)

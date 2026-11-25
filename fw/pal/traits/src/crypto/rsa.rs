@@ -269,10 +269,13 @@ pub trait HsmRsa: HsmIoTypes + HsmCryptoOrder {
     ///
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `key_size` — modulus size selector.
-    /// - `key` — RSA public key.
+    /// - `key` — RSA public key as `n || e`, where the modulus is exactly
+    ///   `key_size.modulus_len()` bytes and the exponent is exactly four
+    ///   bytes. Each integer is encoded independently in operand order
+    ///   ([`HsmCryptoOrder::BYTE_ORDER`]); this is not DER.
     /// - `x` — input integer; must be exactly
     ///   `key_size.modulus_len()` bytes, in operand order
-    ///   ([`HsmCryptoOrder::BYTE_ORDER`]).
+    ///   ([`HsmCryptoOrder::BYTE_ORDER`]) and satisfy `0 <= x < n`.
     /// - `out` — `None` to query the modulus length without exponentiation
     ///   or DMA scratch allocation; `Some(y)` to write the operand-order result.
     ///   The buffer must fit the modulus; any tail is left untouched.

@@ -552,7 +552,8 @@ impl UnoHsmPal {
     ///
     /// - **VF / re-enable** (`Allocated | Disabled → Enabled`): the
     ///   establish-credential and session-encryption ECC P-384 key pairs are
-    ///   generated here with a fresh nonce and default PSKs are installed,
+    ///   generated here with a fresh nonce (and the identity, if a failed
+    ///   [`part_migrate`] left none) and default PSKs are installed,
     ///   then host IO is accepted. Each role must rotate its PSK again.
     /// - **PF enable-before-SetResource** (`Unallocated → Enabled`, only when
     ///   `is_pf`): `res_mask` is not yet assigned, so the enable-time keys
@@ -572,6 +573,7 @@ impl UnoHsmPal {
     /// Returns [`HsmError::InvalidArg`] for an illegal transition.
     ///
     /// [`part_alloc`]: Self::part_alloc
+    /// [`part_migrate`]: Self::part_migrate
     pub(crate) async fn part_enable(&self, pid: HsmPartId, is_pf: bool) -> HsmResult<()> {
         let part = PartStore::partition(pid)?;
         if is_pf && part.state()? == HsmPartState::Faulted {
@@ -579,6 +581,11 @@ impl UnoHsmPal {
         }
         match part.state()? {
             HsmPartState::Allocated | HsmPartState::Disabled => {
+                // A failed NSSR migration can leave the partition without its
+                // identity.
+                if part.id_key_id().is_none() {
+                    self.provision_identity(pid).await?;
+                }
                 self.provision_enabled_keys(pid).await?;
                 part.bake_default_psks();
                 part.set_state(HsmPartState::Enabled);
@@ -639,13 +646,15 @@ impl UnoHsmPal {
     /// reference does `vault().clear()` / `KeyStore::nuke()`) so no prior
     /// tenant key survives, then clears only the per-tenant persistent state
     /// (credential, enable-time/provisioning key handles, nonce, session table,
-    /// BK3 session key, PIN policy) while PRESERVING the provisioning material
-    /// (sealed BK3 + incarnation flag, PTA public key, policy hash, PSKs, VM launch GUID, and
-    /// `Masked_BK_BOOT`). Because the vault wipe also removes the identity
-    /// private key, a fresh partition identity (keypair + id blob) is
-    /// regenerated — matching the *std* reference firmware, whose NSSR/erase
-    /// always provisions a fresh identity. Finally refreshes the nonce and regenerates
-    /// the establish-credential and session-encryption keys.
+    /// BK3 session key, PIN policy) and `PartInit`'s provisioning (policy hash
+    /// and PTA public key), while PRESERVING the migrated state (sealed BK3 +
+    /// incarnation flag, VM launch GUID, and `Masked_BK_BOOT`). The PSKs are
+    /// not migrated: they return to their defaults, and every slot's
+    /// PSK-change-consumed bit is cleared, so each role rotates its PSK again.
+    /// Because the vault wipe also removes the identity private key, a fresh
+    /// partition identity (keypair + id blob) is regenerated, as a migration
+    /// target presents its own identity. Finally refreshes the nonce and
+    /// regenerates the establish-credential and session-encryption keys.
     ///
     /// Established session slots are marked for renegotiation
     /// (`SessionTable::mark_all_needs_renego`), mirroring `state.migrate()`'s
@@ -653,9 +662,10 @@ impl UnoHsmPal {
     /// `SessionNeedsRenegotiation` until the host reopens the session, and
     /// `CloseSession` still succeeds. Pending handshakes are released.
     ///
-    /// Provisioning survives NSSR with a freshly regenerated identity, and
-    /// credentials can be re-established. A full [`part_disable`] additionally
-    /// tears down the provisioning material. This does not implement IDFU
+    /// The partition is provisioned again (`PartInit` / `PartFinal`) after
+    /// NSSR, under a freshly regenerated identity, and credentials can be
+    /// re-established. A full [`part_disable`] additionally tears down the
+    /// migrated state. This does not implement IDFU
     /// queue quiesce/resume.
     ///
     /// # Accepted states
@@ -671,7 +681,9 @@ impl UnoHsmPal {
     ///   per-tenant state and identity fields are cleared; provisioning is
     ///   left to the later `SetResource` → [`part_alloc`] path.
     /// - Anything else — full wipe, then re-provision and leave the
-    ///   partition `Enabled` and re-provisionable.
+    ///   partition `Enabled` and re-provisionable. The partition is
+    ///   `Disabled` while it is rebuilt, so a failure leaves it not serving;
+    ///   a later NSSR retries the migration, and an enable restores it too.
     ///
     /// Note the last case leaves a previously-`Disabled` partition
     /// `Enabled`, so an NSSR is also an implicit re-enable.
@@ -702,6 +714,10 @@ impl UnoHsmPal {
             return Ok(());
         }
 
+        // Not serving while the partition is rebuilt: a failure below leaves
+        // it `Disabled` rather than in its earlier state over cleared tenant
+        // state.
+        part.set_state(HsmPartState::Disabled);
         // Wipe every vault key (app + session + internal) so no prior
         // tenant key material survives the reset, and release the partition's
         // fast-path engine bulk-key slots. Runs inside a `with_admin_io`

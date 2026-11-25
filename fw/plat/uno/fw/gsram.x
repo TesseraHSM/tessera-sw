@@ -2,11 +2,12 @@
 /* Licensed under the MIT License. */
 
 /* Self-test and cold-path code (certificate chain validation, session open,
-   partition provisioning and security-domain backup/restore) and their
-   read-only data are kept in separate output
-   sections: .gsram_text (executable) first, then .gsram_rodata (not
-   executable). The boundary is 32-byte aligned, the ARMv7-M MPU region
-   granularity, so the rodata can be mapped execute-never on its own. */
+   partition provisioning, security-domain backup/restore, and the PAL's
+   boot-only setup and admin IPC) and their read-only data are kept in
+   separate output sections: .gsram_text (executable) first, then
+   .gsram_rodata (not executable). The boundary is 32-byte aligned, the
+   ARMv7-M MPU region granularity, so the rodata can be mapped execute-never
+   on its own. */
 SECTIONS
 {
     .gsram_text : ALIGN(32)
@@ -32,6 +33,9 @@ SECTIONS
         *(.text.*sd_restore_peer_backup*)
         *(.text.*sd_restore_local_backup*)
         *(.text.*sd_backup*)
+        /* Cold path: the PAL's boot-only setup and admin IPC handlers,
+           placed here by `link_section` attributes. */
+        *(.gsram_text.*)
         . = ALIGN(32);
         __gsram_text_end = .;
     } > GSRAM_CODE

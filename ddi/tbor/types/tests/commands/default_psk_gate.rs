@@ -34,7 +34,7 @@
 //! * `ApiRev` remains available after rotation and during an active
 //!   session.
 //!
-//! Each test receives a factory-reset device from
+//! Each test receives a device reset by NSSR from
 //! [`TestCtx::new`](tsra_ddi_tbor_test_harness::TestCtx::new), so partition PSKs
 //! begin at their canonical defaults.
 

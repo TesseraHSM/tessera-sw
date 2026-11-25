@@ -53,7 +53,7 @@ pub fn device_cert_chain(partition: &HsmPartition, slot: u8) -> Result<Vec<Vec<u
 /// A freshly minted security-domain sealing key.
 pub struct SealingKey {
     /// The masked sealing-key blob (sealed under the partition-local
-    /// masking key). `sd_create_remote_backup` uses it as the sender key.
+    /// masking key). SD transfer operations use it only as a recipient key.
     pub masked: Vec<u8>,
     /// COSE_Sign1 `KeyReport` containing the public key and attesting it
     /// (signed by the PID).

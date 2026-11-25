@@ -3,7 +3,7 @@
 
 //! Integration tests for the TBOR `DarcKexKeyGen` command.
 //!
-//! Cross-test isolation comes from `open_dev`'s factory reset; no
+//! Cross-test isolation comes from `open_dev`'s NSSR; no
 //! per-test cleanup is required (see [`tsra_ddi_tbor_test_harness::fixture`]).
 //!
 //! The command generates a P-384 key-exchange keypair and returns the

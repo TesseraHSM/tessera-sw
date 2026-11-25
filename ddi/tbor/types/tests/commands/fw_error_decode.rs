@@ -22,6 +22,7 @@ use tsra_ddi_tbor_types::codec::DecodeError;
 use tsra_ddi_tbor_types::codec::ResponseEncoder;
 use tsra_ddi_tbor_types::TborApiRevResp;
 use tsra_ddi_tbor_types::TborResp;
+use tsra_ddi_tbor_types::TborRsaVerifyResp;
 use tsra_ddi_tbor_types::TborSessionCloseResp;
 
 /// Builds a response envelope with the given status containing one placeholder `None` TOC entry.
@@ -37,6 +38,18 @@ fn encode_err_envelope(status: u32, out: &mut [u8]) -> usize {
 
 const AEAD_ENVELOPE_AUTH_FAILED: u32 = 0x0870_00DD;
 const SESSION_NOT_FOUND: u32 = 0x0870_0004;
+const RSA_VERIFY_FAILED: u32 = 0x0870_010E;
+
+#[test]
+fn rsa_verify_failure_status_decodes() {
+    let mut buf = [0u8; 64];
+    let len = encode_err_envelope(RSA_VERIFY_FAILED, &mut buf);
+
+    assert_eq!(
+        TborRsaVerifyResp::decode_response(&buf[..len]).expect_err("invalid signature"),
+        DecodeError::FwError(RSA_VERIFY_FAILED),
+    );
+}
 
 #[test]
 fn mismatched_response_revision_is_rejected_before_body_or_status() {

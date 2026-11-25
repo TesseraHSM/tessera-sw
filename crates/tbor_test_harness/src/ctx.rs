@@ -21,7 +21,7 @@
 //! retry policy, fault injection) can hook into without touching every
 //! test.
 //!
-//! Cross-test isolation (process-global lock + factory reset) lives
+//! Cross-test isolation (process-global lock + NSSR) lives
 //! in [`crate::fixture::open_dev`], which this type calls
 //! through. Tests that mix-and-match raw [`open_dev`] calls and
 //! [`TestCtx`] both get the same guarantee.
@@ -73,7 +73,7 @@ pub struct TestCtx {
 
 impl TestCtx {
     /// Open the backend device via [`open_dev`] — see its docs for
-    /// the locking + factory-reset semantics.
+    /// the locking + NSSR semantics.
     pub fn new() -> Self {
         Self { dev: open_dev() }
     }
@@ -100,7 +100,7 @@ impl TestCtx {
 
     /// Primary counterpart to [`Self::new_with_path`]: opens the
     /// backend on the caller-supplied `path` **and** acquires
-    /// `TEST_LOCK` + factory-resets the device via
+    /// `TEST_LOCK` + resets the device with an NSSR via
     /// [`open_dev_with_path`].
     ///
     /// Use this when the device is selected out-of-band (e.g. a
@@ -140,18 +140,12 @@ impl TestCtx {
         crate::session::fetch_leaf_cert_der(&self.dev)
     }
 
-    /// Factory-reset the partition. Used by the
-    /// `commands::part_init` determinism test for cold-restart
-    /// iterations. Available on every backend the harness compiles
-    /// under (emu + hw); `sock` gates the whole harness out at
-    /// the crate root.
+    /// Reset the partition with an NSSR, as a live migration in place. The
+    /// handle keeps its session transports, as the SDK does, so sessions
+    /// opened before report `SessionNeedsRenegotiation` until reopened.
+    /// Available on every backend.
     pub fn erase(&self) -> DdiResult<()> {
         self.dev.erase()
-    }
-
-    /// Simulate NSSR while keeping the host's stale channel keys.
-    pub fn migrate(&self) -> DdiResult<()> {
-        self.dev.migrate()
     }
 
     /// Complete a recovery handshake with saved masking-key material.

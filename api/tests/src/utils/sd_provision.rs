@@ -11,11 +11,15 @@
 //! the host with [`tsra_crypto`], mirroring the wire-level
 //! `ddi/tbor/types/tests/harness/x509_fixture.rs`.
 
+use std::sync::Arc;
+
 use tsra_api::*;
 use tsra_crypto::EccCurve;
 use tsra_crypto::EccKeyOp;
 use tsra_crypto::EccPrivateKey;
+use tsra_crypto::EccPublicKey;
 use tsra_crypto::EcdsaAlgo;
+use tsra_crypto::ExportableKey;
 use tsra_crypto::HashAlgo;
 use tsra_crypto::HashOp;
 use tsra_crypto::SignOp;
@@ -37,6 +41,7 @@ use crate::utils::partition_ex_helpers::new_partition;
 
 const SEC1_PUB_LEN: usize = 97;
 pub(crate) const RAW_PUB_LEN: usize = 96;
+
 pub(crate) const SEALING_KEY_BITS: u32 = 384;
 const NOT_BEFORE: &[u8; 15] = b"20250101000000Z";
 const NOT_AFTER: &[u8; 15] = b"20350101000000Z";
@@ -66,6 +71,13 @@ pub(crate) const ROTATED_CO_PSK: [u8; PSK_LEN] = [
     0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0,
 ];
 
+pub(crate) fn spki_pub(raw: &[u8; RAW_PUB_LEN]) -> Vec<u8> {
+    EccPublicKey::from_coordinates(EccCurve::P384, &raw[..48], &raw[48..])
+        .expect("P-384 public key")
+        .to_vec()
+        .expect("DER SPKI")
+}
+
 /// A synthetic P-384 CA key (the policy POTA trust anchor) that signs
 /// certificates and exposes its public key.
 pub(crate) struct CaKey {
@@ -77,6 +89,10 @@ impl CaKey {
     /// Generate a fresh P-384 CA key.
     pub(crate) fn generate() -> Self {
         let private_key = EccPrivateKey::from_curve(EccCurve::P384).expect("P-384 key");
+        Self::from_private_key(private_key)
+    }
+
+    pub(crate) fn from_private_key(private_key: EccPrivateKey) -> Self {
         let (x, y) = private_key.coord_vec().expect("coords");
         let mut pub_sec1 = [0u8; SEC1_PUB_LEN];
         pub_sec1[0] = 0x04;
@@ -675,6 +691,13 @@ impl SdEvidence {
         })
     }
 
+    pub(crate) fn with_hsm_identity<R>(
+        &self,
+        f: impl FnOnce(&tsra_api::HsmSdIdentityEvidence<'_>) -> R,
+    ) -> R {
+        self.with_hsm_evidence(|evidence| f(&evidence.identity()))
+    }
+
     /// Build the receiver key certificate chain (spec `RcvrCertChain`)
     /// together with the borrowed [`HsmSdEvidence`], and pass both to `f`
     /// — the exact argument shape [`HsmSession::sd_create_remote_backup`]
@@ -926,25 +949,40 @@ pub(crate) fn masked_key_and_report(session: &HsmSession) -> (Vec<u8>, [u8; RAW_
 /// the CA keys backing those anchors. The api-level mirror of the emu
 /// harness `sd_initialized_session_with_data`.
 pub(crate) struct DarcReady {
+    /// Partition retained for cross-partition transfer tests.
+    pub(crate) partition: HsmPartition,
     /// Live Crypto-Officer security-domain (V2) session.
     pub(crate) session: HsmSession,
     /// The exact CBOR policy bound at `part_init_ex`.
     pub(crate) policy: Vec<u8>,
     /// Policy DATA CA — anchors the `darc_tmk_export` target chain.
-    pub(crate) data: CaKey,
+    pub(crate) data: Arc<CaKey>,
     /// Policy POTA CA — anchors the `darc_tmk_import` sender chain.
-    pub(crate) pota: CaKey,
+    /// POTA -> PTA -> freshly generated slot-2 PID certificate.
+    pub(crate) pid_chain: Vec<Vec<u8>>,
 }
 
 /// Provision a fresh partition with a DATA+POTA-anchored policy, finalize
 /// it, and initialize its security domain (via a self `sd_create_remote_backup`),
 /// returning a live CO V2 session ready for the DARC key-transfer commands.
 pub(crate) fn darc_sd_initialized_session() -> DarcReady {
-    let sata = CaKey::generate();
-    let pota = CaKey::generate();
-    let data = CaKey::generate();
-
     let (part, rev) = new_partition();
+    darc_sd_initialized_partition(
+        part,
+        rev,
+        Arc::new(CaKey::generate()),
+        Arc::new(CaKey::generate()),
+    )
+}
+
+/// Provision a selected partition under shared DARC authorities.
+pub(crate) fn darc_sd_initialized_partition(
+    part: HsmPartition,
+    rev: HsmApiRev,
+    pota: Arc<CaKey>,
+    data: Arc<CaKey>,
+) -> DarcReady {
+    let sata = CaKey::generate();
 
     let session = crate::utils::partition_ex_helpers::open_rotated_co_session(&part, rev);
 
@@ -976,21 +1014,25 @@ pub(crate) fn darc_sd_initialized_session() -> DarcReady {
     session
         .part_final_ex(&policy, &certs, None)
         .expect("part_final_ex");
+    let pid_cert = tsra_crypto::pem_to_der(part.cert_chain(2).expect("PID chain").as_bytes())
+        .expect("PID DER");
+    let pid_chain = vec![chain.root_der, chain.pta_der, pid_cert];
 
     // Provision the security domain (self-backup), marking the partition
     // SD-initialized so the DARC commands (which require an SDMK) proceed.
-    let (masked, rcvr_pub, report) = masked_key_and_report(&session);
+    let (_masked, rcvr_pub, report) = masked_key_and_report(&session);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata, &report);
     evidence
         .with_create_backup(|rcvr_chain, receiver| {
-            session.sd_create_remote_backup(&policy, &masked, rcvr_chain, receiver)
+            session.sd_create_remote_backup(&policy, rcvr_chain, receiver)
         })
         .expect("sd_create_remote_backup");
 
     DarcReady {
+        partition: part,
         session,
         policy,
         data,
-        pota,
+        pid_chain,
     }
 }

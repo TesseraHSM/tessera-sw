@@ -758,7 +758,7 @@ TEST_F(tsra_sess_ex, cu_rotation_rebinds_calling_session)
     });
 }
 
-TEST_F(tsra_sess_ex, migration_reopen_preserves_psk_change_allowance)
+TEST_F(tsra_sess_ex, migration_reopen_uses_default_psk_and_restores_psk_change)
 {
     if (!api_rev_at_least(1, 1))
     {
@@ -791,7 +791,11 @@ TEST_F(tsra_sess_ex, migration_reopen_preserves_psk_change_allowance)
         std::vector<uint8_t> wrong_psk(32, 0xD6);
         tsra_buffer wrong{ wrong_psk.data(), static_cast<uint32_t>(wrong_psk.size()) };
         EXPECT_NE(tsra_sess_ex_reopen(session, &root.buffer, &wrong), TSRA_STATUS_SUCCESS);
-        ASSERT_EQ(tsra_sess_ex_reopen(session, &root.buffer, &credential), TSRA_STATUS_SUCCESS);
+        // The migration returned the PSKs to their defaults.
+        EXPECT_NE(tsra_sess_ex_reopen(session, &root.buffer, &credential), TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(tsra_sess_ex_reopen(session, &root.buffer, nullptr), TSRA_STATUS_SUCCESS);
+        // It also restored the change allowance, so the role rotates again.
+        ASSERT_EQ(tsra_sess_ex_psk_change(session, &credential), TSRA_STATUS_SUCCESS);
         EXPECT_EQ(
             tsra_sess_ex_psk_change(session, &credential),
             TSRA_STATUS_PSK_CHANGE_ALREADY_USED
@@ -923,7 +927,7 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
 
         std::vector<uint8_t> policy(512, 0);
         std::vector<uint8_t> key(kMaskedSealingKeyLen, 0);
-        std::vector<uint8_t> backup(kPokLocalBackupLen, 0);
+        std::vector<uint8_t> backup(kPokRemoteBackupLen, 0);
         uint8_t cert = 0;
         uint8_t report = 0;
         tsra_buffer policy_buf{ policy.data(), 0 };
@@ -932,33 +936,32 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
         tsra_buffer report_buf{ &report, 1 };
         tsra_sd_cert_chain chain{ &cert_buf, 1 };
         tsra_sd_evidence evidence{ chain, chain, chain, &report_buf };
-        tsra_buffer remote_backup{ backup.data(), 161 };
+        tsra_sd_identity_evidence identity{ chain, chain, chain };
+        tsra_buffer remote_backup{ backup.data(), kPokRemoteBackupLen };
         tsra_buffer local_backup{ backup.data(), kPokLocalBackupLen };
         tsra_buffer mk_backup{ backup.data(), kSdMkBackupLen };
 
         tsra_sd_create_remote_backup_params create{
             &policy_buf,
-            &key_buf,
             chain,
             &evidence,
         };
         tsra_sd_reseal_remote_backup_params reseal{
-            &policy_buf, &key_buf, &evidence, &evidence, &remote_backup,
+            &policy_buf, &key_buf, &identity, &evidence, &remote_backup,
         };
         tsra_sd_restore_remote_backup_params restore{
-            &policy_buf, &key_buf, chain, &evidence, &remote_backup, &mk_backup,
+            &policy_buf, &key_buf, &key_buf, &identity, &remote_backup, &mk_backup,
         };
         tsra_sd_create_peer_backup_params create_peer{
             &policy_buf,
-            &key_buf,
             &evidence,
             &local_backup,
         };
         tsra_sd_restore_peer_backup_params restore_peer{
-            &policy_buf, &key_buf, &evidence, &remote_backup, &mk_backup,
+            &policy_buf, &key_buf, &identity, &remote_backup, &mk_backup,
         };
 
-        std::vector<uint8_t> remote(161, 0);
+        std::vector<uint8_t> remote(kPokRemoteBackupLen, 0);
         std::vector<uint8_t> local(kPokLocalBackupLen, 0);
         std::vector<uint8_t> mk(kSdMkBackupLen, 0);
         tsra_buffer remote_out{ remote.data(), static_cast<uint32_t>(remote.size()) };

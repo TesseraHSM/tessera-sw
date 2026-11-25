@@ -8,6 +8,7 @@ use anyhow::Context;
 use anyhow::Result;
 use jzon::JsonValue;
 use tsra_sealing_api::Evidence;
+use tsra_sealing_api::IdentityEvidence;
 use tsra_sealing_api::PeerBackup;
 use tsra_sealing_api::ResealedBackup;
 
@@ -54,32 +55,55 @@ pub fn encode_evidence(evidence: &Evidence) -> JsonValue {
     }
 }
 
+pub fn identity(value: &JsonValue) -> Result<IdentityEvidence> {
+    Ok(IdentityEvidence {
+        mfgr_cert_chain: chain(value, "manufacturer")?,
+        owner_cert_chain: chain(value, "owner")?,
+        part_owner_cert_chain: chain(value, "partition_owner")?,
+    })
+}
+
+pub fn encode_identity(evidence: &IdentityEvidence) -> JsonValue {
+    jzon::object! {
+        manufacturer: encode_chain(&evidence.mfgr_cert_chain),
+        owner: encode_chain(&evidence.owner_cert_chain),
+        partition_owner: encode_chain(&evidence.part_owner_cert_chain),
+    }
+}
+
 pub fn backup(value: &JsonValue) -> Result<PeerBackup> {
-    Ok(PeerBackup {
+    anyhow::ensure!(
+        value["version"].as_u32() == Some(2),
+        "unsupported peer backup version"
+    );
+    let backup = PeerBackup {
         pok_peer_backup: blob(value, "peer_backup")?,
         sd_mk_backup: blob(value, "sd_mk_backup")?,
-        sender_evidence: evidence(&value["sender"])?,
-    })
+        sender_evidence: identity(&value["sender"])?,
+    };
+    tsra_sealing_report::parse_sd_transfer_report(&backup.pok_peer_backup)?;
+    Ok(backup)
 }
 
 pub fn encode_backup(backup: &PeerBackup) -> JsonValue {
     jzon::object! {
+        version: 2,
         peer_backup: hex::encode(&backup.pok_peer_backup),
         sd_mk_backup: hex::encode(&backup.sd_mk_backup),
-        sender: encode_evidence(&backup.sender_evidence),
+        sender: encode_identity(&backup.sender_evidence),
     }
 }
 
 pub fn resealed_backup(value: &JsonValue) -> Result<ResealedBackup> {
     anyhow::ensure!(
-        value["version"].as_u32() == Some(1),
+        value["version"].as_u32() == Some(2),
         "invalid resealed backup version"
     );
     let backup = ResealedBackup {
         pok_remote_backup: blob(value, "pok_remote_backup")?,
         sd_mk_backup: blob(value, "sd_mk_backup")?,
-        sender_cert_chain: chain(&value["sender"], "chain")?,
-        sender_evidence: evidence(&value["sender"]["evidence"])?,
+        sender_pid_pub_key: blob(&value["sender"], "pid_pub_key")?,
+        sender_evidence: identity(&value["sender"]["evidence"])?,
     };
     backup.validate()?;
     Ok(backup)

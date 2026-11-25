@@ -112,7 +112,6 @@ fn build_source_backups(ctx: &TestCtx, key_scope: common::KeyScope) -> SourceBac
     let receiver_cert_chain = push_chain(&mut oob_items, receiver_chain);
     let request = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
-        masked_sealing_key: sealing_key.masked_key,
         receiver_cert_chain,
         receiver_mfgr_cert_chain: Vec::new(),
         receiver_owner_cert_chain: Vec::new(),

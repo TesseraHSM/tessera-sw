@@ -12,14 +12,15 @@
 //!    from another test would be corrupted by this one's `erase`.
 //! 2. Opens the device advertised by the configured backend
 //!    (`sock` or hw).
-//! 3. Factory-resets the device on every backend that owns partition
-//!    state so every test starts from byte-identical
-//!    state — no inherited session slots, no inherited PSK rotations,
-//!    no implicit ordering dependency on other tests' cleanup
-//!    discipline.
+//! 3. Resets the device with an NSSR on every backend, as on hardware:
+//!    a live migration in place. Every test starts with the default
+//!    PSKs, an `Enabled` partition that `PartInit` can provision, and no
+//!    pending handshakes. The migrated state (sealed BK3,
+//!    `Masked_BK_BOOT`, VM launch GUID) survives, as do established
+//!    sessions, for renegotiation, so a test closes the sessions it
+//!    opens (`SessionGuard` does on drop).
 //!
-//! Tests therefore become self-contained by construction. The
-//! returned [`TestDev`] wraps the backend handle in a type that
+//! The returned [`TestDev`] wraps the backend handle in a type that
 //! `Deref`s to the underlying `<TsraDdi as Ddi>::Dev`, so existing
 //! call sites (`let dev = open_dev(); helper(&dev, ...)`) keep
 //! compiling without modification — deref coercion supplies the
@@ -82,13 +83,6 @@ pub const ROTATED_CU_PSK: [u8; PSK_LEN] = [
     0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
     0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
 ];
-
-fn factory_reset(dev: &tsra_ddi::TsraDdiDev) -> DdiResult<()> {
-    match dev {
-        tsra_ddi::TsraDdiDev::Sock(dev) => dev.factory_reset(),
-        tsra_ddi::TsraDdiDev::Ioctl(dev) => dev.erase(),
-    }
-}
 
 /// Rotate the default CO PSK and return a fresh CO session.
 pub fn bootstrap_rotated_co(ctx: &TestCtx, target_psk: &[u8; PSK_LEN]) -> SessionHandshake {
@@ -338,13 +332,11 @@ impl TestDev {
             .exec_op_tbor_oob(self.api_rev(), req, oob_items, cookie)
     }
 
-    /// Factory-reset the device, dropping every session transport.
+    /// Reset the device with an NSSR. Like the SDK, this handle keeps its
+    /// session transports: the device keeps established sessions for
+    /// renegotiation, so their commands go out sealed under the stale keys
+    /// and report `SessionNeedsRenegotiation` until reopened.
     pub fn erase(&self) -> DdiResult<()> {
-        self.transports.lock().clear();
-        factory_reset(&self.dev)
-    }
-
-    pub(crate) fn migrate(&self) -> DdiResult<()> {
         self.dev.erase()
     }
 }
@@ -369,8 +361,8 @@ impl Deref for TestDev {
     }
 }
 
-/// Acquire the test lock, open the configured backend device, and
-/// factory-reset it before use.
+/// Acquire the test lock, open the configured backend device, and reset
+/// it with an NSSR before use.
 ///
 /// Panics if the backend lists no devices or if `erase` fails — both
 /// are backend bugs, not test bugs, and surfacing them immediately
@@ -382,14 +374,14 @@ pub fn open_dev() -> TestDev {
     let info = infos.first().expect("backend should advertise a device");
     let path = info.path.clone();
     let dev = ddi.open_dev(&path).expect("open test backend device");
-    factory_reset(&dev).expect("open_dev: factory-reset backend before test");
+    dev.erase().expect("open_dev: NSSR before test");
     TestDev::new(dev, Some(guard), &path)
 }
 
 /// Primary counterpart to [`open_dev`] that opens the caller-
 /// supplied backend `path` instead of the first device advertised by
 /// `TsraDdi::dev_info_list()`. Still acquires `TEST_LOCK` and
-/// factory-resets the device before returning, giving the caller the
+/// resets the device with an NSSR before returning, giving the caller the
 /// same isolation guarantees as [`open_dev`].
 ///
 /// Use this when the device is selected out-of-band (e.g. via an
@@ -403,7 +395,7 @@ pub fn open_dev_with_path(path: &str) -> TestDev {
     let dev = TsraDdi::default()
         .open_dev(path)
         .expect("open test backend device on caller-supplied path");
-    factory_reset(&dev).expect("open_dev_with_path: factory-reset backend before test");
+    dev.erase().expect("open_dev_with_path: NSSR before test");
     TestDev::new(dev, Some(guard), path)
 }
 

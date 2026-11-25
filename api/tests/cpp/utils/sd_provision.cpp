@@ -8,8 +8,6 @@
 #include <cstring>
 #include <functional>
 #include <memory>
-#include <mutex>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -1000,41 +998,21 @@ tsra_handle open_co_session(tsra_handle part_handle, const tsra_buffer *psk_buf)
 
 tsra_handle open_rotated_co_session(tsra_handle part_handle)
 {
-    static std::mutex mutex;
-    static std::set<Bytes> rotated_partitions;
-    std::lock_guard<std::mutex> lock(mutex);
-
-    tsra_part_prop prop{ TSRA_PART_PROP_ID_PATH, nullptr, 0 };
-    if (tsra_part_get_prop(part_handle, &prop) != TSRA_STATUS_BUFFER_TOO_SMALL)
-    {
-        ADD_FAILURE() << "test partition path size query failed";
-        return 0;
-    }
-    Bytes path(prop.len);
-    prop.val = path.data();
-    if (tsra_part_get_prop(part_handle, &prop) != TSRA_STATUS_SUCCESS)
-    {
-        ADD_FAILURE() << "test partition path retrieval failed";
-        return 0;
-    }
     tsra_buffer psk_buf{ const_cast<uint8_t *>(kRotatedCoPsk.data()),
                          static_cast<uint32_t>(kRotatedCoPsk.size()) };
-    // NSSR preserves credentials, so only the first provisioning rotates them.
-    if (!rotated_partitions.contains(path))
+    // An NSSR returns the PSKs to their defaults, so each provisioning of a
+    // just-reset partition rotates the CO PSK again.
+    tsra_handle bootstrap = open_co_session(part_handle, nullptr);
+    if (bootstrap == 0)
     {
-        tsra_handle bootstrap = open_co_session(part_handle, nullptr);
-        if (bootstrap == 0)
-        {
-            return 0;
-        }
-        auto err = tsra_sess_ex_psk_change(bootstrap, &psk_buf);
-        tsra_sess_close(bootstrap);
-        if (err != TSRA_STATUS_SUCCESS)
-        {
-            ADD_FAILURE() << "tsra_sess_ex_psk_change failed: " << err;
-            return 0;
-        }
-        rotated_partitions.insert(std::move(path));
+        return 0;
+    }
+    auto err = tsra_sess_ex_psk_change(bootstrap, &psk_buf);
+    tsra_sess_close(bootstrap);
+    if (err != TSRA_STATUS_SUCCESS)
+    {
+        ADD_FAILURE() << "tsra_sess_ex_psk_change failed: " << err;
+        return 0;
     }
     return open_co_session(part_handle, &psk_buf);
 }
@@ -1556,6 +1534,7 @@ void SdEvidenceHolder::wire()
     ev_.owner_cert_chain = { owner_bufs_, 2 };
     ev_.part_owner_cert_chain = { po_bufs_, 2 };
     ev_.report = &report_buf_;
+    identity_ = { ev_.mfgr_cert_chain, ev_.owner_cert_chain, ev_.part_owner_cert_chain };
     rcvr_chain_ = { rcvr_bufs_, 2 };
 }
 
@@ -1780,10 +1759,8 @@ DarcReadyContext provision_darc_session(tsra_handle part_handle)
     bctx.pota_key = pota_ca;
     SdEvidenceHolder evidence = build_receiver_evidence(bctx, sealing.pub, sealing.report);
 
-    tsra_buffer masked_buf{ sealing.masked.data(), static_cast<uint32_t>(sealing.masked.size()) };
     tsra_sd_create_remote_backup_params create_params{
         &policy_buf,
-        &masked_buf,
         evidence.receiver_chain(),
         &evidence.get(),
     };
@@ -1828,6 +1805,7 @@ DarcReadyContext provision_darc_session(tsra_handle part_handle)
     ctx.policy = std::move(policy);
     ctx.data_key = std::move(data_ca);
     ctx.pota_key = std::move(pota_ca);
+    ctx.pid_pub = std::move(pid_pub);
     return ctx;
 }
 

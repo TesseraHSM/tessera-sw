@@ -199,11 +199,15 @@ impl HsmSession {
         }
     }
 
-    /// Recover this migrated TBOR session with the current role PSK.
+    /// Recover this migrated TBOR session with the current role PSK, which a
+    /// migration returns to the role's default (`None`) until a session
+    /// rotates it again.
     ///
     /// Uses a fresh authenticated handshake while restoring the original
-    /// masking key. Reopen does not grant another PSK change or retry the
-    /// interrupted application command. Only valid for a stale V2 session.
+    /// masking key. Reopen neither grants another PSK change nor retries the
+    /// interrupted application command; the migration restored the
+    /// session's PSK change, so a session reopened under the default PSK
+    /// rotates its role PSK. Only valid for a stale V2 session.
     pub fn reopen_ex(
         &self,
         root_spki_thumbprint: &[u8; 48],
@@ -310,19 +314,17 @@ impl HsmSession {
     /// Issues TBOR `SdCreateRemoteBackup` (opcode `0x0A`) on this CO
     /// session.
     ///
-    /// Creates a new security domain from the caller-supplied
-    /// `part_policy`, using the sender's `masked_sealing_key` (from
-    /// `SdSealingKeyGen`). The receiver public key is always recovered from
+    /// Creates a new security domain from the caller-supplied unified
+    /// `part_policy`. The receiver public key is always recovered from
     /// the authoritative `receiver_cert_chain` (anchored to the policy SATA
     /// key thumbprint); `receiver_evidence` is optional and verified only when the
     /// policy sets `require_trusted_sa_key` (pass an empty evidence
-    /// otherwise). Returns the remote backup together with the device-local
-    /// backups. Only valid on a V2 session; a V1 session returns
+    /// otherwise). Returns one PID-signed Base `SdBackup` envelope
+    /// together with the device-local backups. Only valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
     pub fn sd_create_remote_backup(
         &self,
         part_policy: &[u8],
-        masked_sealing_key: &[u8],
         receiver_cert_chain: &[HsmCert<'_>],
         receiver_evidence: &HsmSdEvidence<'_>,
     ) -> HsmResult<HsmSdRemoteBackupResult> {
@@ -332,7 +334,6 @@ impl HsmSession {
                 &inner.partition,
                 inner.rev,
                 inner.id,
-                masked_sealing_key,
                 receiver_cert_chain,
                 receiver_evidence,
                 part_policy,
@@ -346,8 +347,8 @@ impl HsmSession {
     ///
     /// Generates a new DARC key-exchange key (ECC-P384) and returns the
     /// masked private key plus its raw P-384 public key (`x ‖ y`, 96
-    /// bytes, big-endian per coordinate). Run on the target it yields the HPKE receiver identity; run
-    /// on the source it yields the HPKE sender-auth identity. Only valid on
+    /// bytes, big-endian per coordinate). This is the HPKE recipient key;
+    /// the source authenticates exports using its PID instead. Only valid on
     /// a V2 session; a V1 session returns [`HsmError::InvalidSession`].
     pub fn darc_kex_key_gen(
         &self,
@@ -368,30 +369,26 @@ impl HsmSession {
     /// Issues TBOR `DarcTmkExport` (opcode `0x24`) on this CO session.
     ///
     /// Seals the TMK to an authenticated target: validates
-    /// `target_cert_chain` against the policy DATA key thumbprint, then HPKE-Auth
-    /// seals the TMK to the target's KEX key. Returns the sealed TMK. Only
+    /// `target_cert_chain` against the policy `data_spki_thumbprint`, then HPKE Base
+    /// seals the TMK to the target's KEX key and PID-signs a `Darc` report.
+    /// Returns both artifacts; no sender KEX key is required. Only
     /// valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
     pub fn darc_tmk_export(
         &self,
-        masked_sender_key: &[u8],
         masked_tmk: &[u8],
         policy: &[u8],
         target_cert_chain: &[HsmCert<'_>],
-    ) -> HsmResult<[u8; SEALED_TMK_LEN]> {
-        ddi::darc_tmk_export(
-            self,
-            masked_sender_key,
-            masked_tmk,
-            policy,
-            target_cert_chain,
-        )
+    ) -> HsmResult<HsmDarcTmkExportResult> {
+        ddi::darc_tmk_export(self, masked_tmk, policy, target_cert_chain)
     }
 
     /// Issues TBOR `DarcTmkImport` (opcode `0x21`) on this CO session.
     ///
     /// Opens a `sealed_tmk` on the target: validates `remote_cert_chain`
-    /// against the policy POTA key thumbprint, HPKE-Auth opens the sealed TMK, and
+    /// against the policy `pota_spki_thumbprint` to authorize the reporting PID,
+    /// verifies `report` and its recipient/envelope binding, HPKE Base
+    /// opens the sealed TMK, and
     /// re-masks it under the partition SDMK. Returns the masked TMK. Only
     /// valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
@@ -408,20 +405,20 @@ impl HsmSession {
     /// Issues TBOR `SdResealRemoteBackup` (opcode `0x0B`) on this CO
     /// session.
     ///
-    /// HPKE-opens `src_remote_backup` with the receiver's
-    /// `masked_sealing_key` (authenticated by the source sender in
-    /// `src_evidence`) and reseals the recovered backup to the destination
-    /// receiver (`dest_evidence`), returning the resealed remote backup.
+    /// Verifies the source PID's POTA-authorized `SdBackup` signature before
+    /// Base-opening with `masked_sealing_key`, then reseals to the authorized
+    /// destination. Returns one local-PID-signed envelope.
+    /// Both transfers bind `part_policy`, which may differ from the SA-local policy.
     /// Only valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
     pub fn sd_reseal_remote_backup(
         &self,
         part_policy: &[u8],
         masked_sealing_key: &[u8],
-        src_evidence: &HsmSdEvidence<'_>,
+        src_evidence: &HsmSdIdentityEvidence<'_>,
         dest_evidence: &HsmSdEvidence<'_>,
         src_remote_backup: &[u8],
-    ) -> HsmResult<Vec<u8>> {
+    ) -> HsmResult<HsmSdTransferResult> {
         let inner = self.inner.read();
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_reseal_remote_backup_ex(
@@ -442,18 +439,20 @@ impl HsmSession {
     /// Issues TBOR `SdRestoreRemoteBackup` (opcode `0x0C`) on this CO
     /// session.
     ///
-    /// HPKE-opens `src_remote_backup` with the receiver's
-    /// `masked_sealing_key` (authenticated by the sender key recovered from
-    /// `sender_cert_chain`), recovers the security-domain masking key from
-    /// `prev_sd_mk_backup`, and returns the refreshed device-local backups.
+    /// Verifies the `SdBackup` signature against
+    /// `sender_pid_pub_key` (DER SPKI; currently canonical P-384), the actual recipient, envelope,
+    /// and target SD policy before Base-opening with `masked_sealing_key`.
+    /// SAPOTA authenticates the source PID only when trusted-SA policy is set;
+    /// otherwise verification establishes signature integrity, not SA identity.
+    /// Recovers SDMK from `prev_sd_mk_backup` and returns local backups.
     /// Only valid on a V2 session; a V1 session returns
     /// [`HsmError::InvalidSession`].
     pub fn sd_restore_remote_backup(
         &self,
         part_policy: &[u8],
         masked_sealing_key: &[u8],
-        sender_cert_chain: &[HsmCert<'_>],
-        sender_evidence: &HsmSdEvidence<'_>,
+        sender_pid_pub_key: &[u8],
+        sender_evidence: &HsmSdIdentityEvidence<'_>,
         src_remote_backup: &[u8],
         prev_sd_mk_backup: &[u8],
     ) -> HsmResult<HsmSdRestoreResult> {
@@ -464,7 +463,7 @@ impl HsmSession {
                 inner.rev,
                 inner.id,
                 masked_sealing_key,
-                sender_cert_chain,
+                sender_pid_pub_key,
                 sender_evidence,
                 part_policy,
                 src_remote_backup,
@@ -477,25 +476,23 @@ impl HsmSession {
 
     /// Issues TBOR `SdCreatePeerBackup` (opcode `0x0E`) on this CO session.
     ///
-    /// Recovers BKS3 from `pok_local_backup` and HPKE-Auth-seals it to the
-    /// destination peer in `dst_evidence` (authenticated by the sender's
-    /// `masked_sealing_key`), returning the peer backup. Gated by the
+    /// Recovers BKS3 from `pok_local_backup` and Base-seals it to the
+    /// POTA-authorized same-policy peer in `dst_evidence`, returning the
+    /// directly PID-signed `SdBackup` envelope. Gated by the
     /// security domain's `allow_peer_cloning` policy flag. Only valid on a
     /// V2 session; a V1 session returns [`HsmError::InvalidSession`].
     pub fn sd_create_peer_backup(
         &self,
         part_policy: &[u8],
-        masked_sealing_key: &[u8],
         dst_evidence: &HsmSdEvidence<'_>,
         pok_local_backup: &[u8],
-    ) -> HsmResult<Vec<u8>> {
+    ) -> HsmResult<HsmSdTransferResult> {
         let inner = self.inner.read();
         match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_create_peer_backup_ex(
                 &inner.partition,
                 inner.rev,
                 inner.id,
-                masked_sealing_key,
                 dst_evidence,
                 part_policy,
                 pok_local_backup,
@@ -508,8 +505,8 @@ impl HsmSession {
     /// Issues TBOR `SdRestorePeerBackup` (opcode `0x0F`) on this CO
     /// session.
     ///
-    /// HPKE-opens `pok_peer_backup` with the receiver's `masked_sealing_key`
-    /// (authenticated by the source peer in `src_evidence`), recovers the
+    /// Verifies the POTA-authorized source PID's `SdBackup` report and SD
+    /// policy binding before Base-opening with `masked_sealing_key`, recovers the
     /// security-domain masking key from `prev_sd_mk_backup`, and returns the
     /// refreshed device-local backups. Gated by the security domain's
     /// `allow_peer_cloning` policy flag. Only valid on a V2 session; a V1
@@ -518,7 +515,7 @@ impl HsmSession {
         &self,
         part_policy: &[u8],
         masked_sealing_key: &[u8],
-        src_evidence: &HsmSdEvidence<'_>,
+        src_evidence: &HsmSdIdentityEvidence<'_>,
         pok_peer_backup: &[u8],
         prev_sd_mk_backup: &[u8],
     ) -> HsmResult<HsmSdRestoreResult> {

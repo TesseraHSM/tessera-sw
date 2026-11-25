@@ -491,7 +491,7 @@ impl HsmEcc for StdHsmPal {
             Self::ecc_private_curve(priv_key)?;
             return Ok(wire_pub_len);
         };
-        if pub_key.len() < wire_pub_len {
+        if pub_key.len() < wire_pub_len || !(pub_key.as_ptr() as usize).is_multiple_of(4) {
             return Err(HsmError::InvalidArg);
         }
         self.ecc
@@ -832,9 +832,9 @@ mod tests {
                 let input = sign_input(alloc, curve, hash)?;
                 let signature_len = curve.wire_sig_len(StdHsmPal::ECC_COORD_PAD);
                 let signature = alloc.dma_alloc(signature_len + 4)?;
-                let derived_storage = alloc.dma_alloc(public_len + 5)?;
+                let derived_storage = alloc.dma_alloc(public_len + 8)?;
                 derived_storage.fill(0xCC);
-                let derived = &mut derived_storage[1..];
+                let derived = &mut derived_storage[4..];
                 let secret_len = curve.secret_len();
                 let secret = alloc.dma_alloc(secret_len + 4)?;
                 signature.fill(0xCC);
@@ -890,6 +890,13 @@ mod tests {
                             curve,
                             private,
                             Some(&mut derived[..public_len - 1]),
+                        )
+                        .await,
+                        pal.ecc_pub_from_priv(
+                            &io,
+                            curve,
+                            private,
+                            Some(&mut derived[1..public_len + 1]),
                         )
                         .await,
                         pal.ecdh_derive(
@@ -952,7 +959,7 @@ mod tests {
                     assert_eq!(&derived[public_len..], &[0xCC; 4]);
                     assert_eq!(&secret[secret_len..], &[0xCC; 4]);
                 }
-                assert_eq!(derived_storage[0], 0xCC);
+                assert!(derived_storage[..4].iter().all(|&b| b == 0xCC));
                 Ok(())
             })
             .await

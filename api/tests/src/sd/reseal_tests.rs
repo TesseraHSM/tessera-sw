@@ -4,12 +4,11 @@
 //! api-level `SdResealRemoteBackup` round trip against the emulator or
 //! hardware backend.
 //!
-//! Self-reseal on one partition: mint receiver / sender / destination SD
+//! Self-reseal on one partition: mint receiver / destination SD
 //! sealing keys, use `sd_create_remote_backup` to produce a real source
-//! backup (BKS3 sealed to the receiver by the sender), then reseal it to
+//! PID-signed backup, then reseal it to
 //! the destination. A successful reseal is itself the correctness check —
-//! the HPKE open only succeeds if the receiver key and the attested sender
-//! key match those that sealed the source.
+//! the HPKE open only succeeds if the report binds the envelope and recipient.
 
 use tsra_api::*;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
@@ -22,27 +21,24 @@ use crate::utils::sd_provision::build_receiver_evidence;
 use crate::utils::sd_provision::masked_key_and_report;
 use crate::utils::sd_provision::provision_backing;
 
-/// Create a real source backup: a fresh BKS3 sealed to the receiver's
-/// attested public key (`receiver_report`) by the `masked_sender_key`.
+/// Create a signed source backup and retain its producer identity.
 fn create_source_backup(
     session: &HsmSession,
     sata_key: &CaKey,
     pid_pub: &[u8; RAW_PUB_LEN],
-    masked_sender_key: &[u8],
     receiver_pub: &[u8; RAW_PUB_LEN],
     receiver_report: &[u8],
     policy: &[u8],
-) -> Vec<u8> {
+) -> HsmSdRemoteBackupResult {
     let receiver = build_receiver_evidence(pid_pub, receiver_pub, sata_key, receiver_report);
     receiver
         .with_create_backup(|rcvr_chain, rcvr| {
-            session.sd_create_remote_backup(policy, masked_sender_key, rcvr_chain, rcvr)
+            session.sd_create_remote_backup(policy, rcvr_chain, rcvr)
         })
         .expect("source backup")
-        .pok_remote_backup
 }
 
-/// Happy path: resealing a real source backup yields a fresh 161-byte,
+/// Happy path: resealing a real source backup yields a fresh 431-byte,
 /// non-zero backup distinct from the source ciphertext.
 #[test]
 fn sd_reseal_remote_backup_roundtrip() {
@@ -54,43 +50,78 @@ fn sd_reseal_remote_backup_roundtrip() {
     let pota_key = CaKey::generate();
     let (session, policy, pid_pub, _local_mk) = provision_backing(&sata_key, &pota_key, None, None);
 
-    // Receiver (unseals the source), sender (sealed the source), and
-    // destination (the reseal target) SD sealing keys, each attested.
+    // Receiver (unseals the source) and destination (the reseal target).
     let (masked_rcvr, rcvr_pub_rcvr, report_rcvr) = masked_key_and_report(&session);
-    let (masked_sndr, rcvr_pub_sndr, report_sndr) = masked_key_and_report(&session);
     let (_masked_dst, rcvr_pub_dst, report_dst) = masked_key_and_report(&session);
 
     let src_backup = create_source_backup(
         &session,
         &sata_key,
         &pid_pub,
-        &masked_sndr,
         &rcvr_pub_rcvr,
         &report_rcvr,
         &policy,
     );
 
-    // Reseal: open with the receiver key (auth = sender), reseal to the
-    // destination receiver.
-    let src_ev = build_evidence(&pid_pub, &rcvr_pub_sndr, &sata_key, &pota_key, &report_sndr);
+    let src_ev = build_evidence(&pid_pub, &pid_pub, &sata_key, &pota_key, &[]);
     let dst_ev = build_evidence(&pid_pub, &rcvr_pub_dst, &sata_key, &pota_key, &report_dst);
+    let generic_source =
+        build_evidence(&pid_pub, &rcvr_pub_rcvr, &sata_key, &pota_key, &report_rcvr);
+    assert!(
+        generic_source
+            .with_hsm_identity(|src| {
+                dst_ev.with_hsm_evidence(|dest| {
+                    session.sd_reseal_remote_backup(&policy, &masked_rcvr, src, dest, &report_rcvr)
+                })
+            })
+            .is_err(),
+        "a PublicKey report cannot replace the signed source backup",
+    );
+    let wrong_policy = PartPolicyBuilder::new()
+        .pota_key(PolicyKeyFormat::EccP384, &pota_key.raw_pub())
+        .sata_key(PolicyKeyFormat::EccP384, &sata_key.raw_pub())
+        .allow_peer_cloning(true)
+        .build()
+        .expect("different client policy");
+    assert!(
+        src_ev
+            .with_hsm_identity(|src| {
+                dst_ev.with_hsm_evidence(|dest| {
+                    session.sd_reseal_remote_backup(
+                        &wrong_policy,
+                        &masked_rcvr,
+                        src,
+                        dest,
+                        &src_backup.pok_remote_backup,
+                    )
+                })
+            })
+            .is_err(),
+        "the source operation and destination key must match the requested SD policy",
+    );
     let dst_backup = src_ev
-        .with_hsm_evidence(|src| {
+        .with_hsm_identity(|src| {
             dst_ev.with_hsm_evidence(|dest| {
-                session.sd_reseal_remote_backup(&policy, &masked_rcvr, src, dest, &src_backup)
+                session.sd_reseal_remote_backup(
+                    &policy,
+                    &masked_rcvr,
+                    src,
+                    dest,
+                    &src_backup.pok_remote_backup,
+                )
             })
         })
         .expect("reseal remote backup");
 
-    // A successful HPKE open -> seal yields a 161-byte, non-zero backup.
-    assert_eq!(dst_backup.len(), POK_REMOTE_BACKUP_LEN);
+    // A successful HPKE open -> seal yields a 431-byte, non-zero backup.
+    assert_eq!(dst_backup.backup.len(), POK_REMOTE_BACKUP_LEN);
     assert!(
-        dst_backup.iter().any(|&b| b != 0),
+        dst_backup.backup.iter().any(|&b| b != 0),
         "dst_remote_backup must not be all-zero",
     );
     // The resealed backup is a fresh HPKE encapsulation, not the source.
     assert_ne!(
-        dst_backup, src_backup,
+        dst_backup.backup, src_backup.pok_remote_backup,
         "reseal must produce a fresh encapsulation, not echo the source",
     );
 }
@@ -108,26 +139,30 @@ fn sd_reseal_remote_backup_rerandomizes() {
     let (session, policy, pid_pub, _local_mk) = provision_backing(&sata_key, &pota_key, None, None);
 
     let (masked_rcvr, rcvr_pub_rcvr, report_rcvr) = masked_key_and_report(&session);
-    let (masked_sndr, rcvr_pub_sndr, report_sndr) = masked_key_and_report(&session);
     let (_masked_dst, rcvr_pub_dst, report_dst) = masked_key_and_report(&session);
 
     let src_backup = create_source_backup(
         &session,
         &sata_key,
         &pid_pub,
-        &masked_sndr,
         &rcvr_pub_rcvr,
         &report_rcvr,
         &policy,
     );
 
-    let src_ev = build_evidence(&pid_pub, &rcvr_pub_sndr, &sata_key, &pota_key, &report_sndr);
+    let src_ev = build_evidence(&pid_pub, &pid_pub, &sata_key, &pota_key, &[]);
     let dst_ev = build_evidence(&pid_pub, &rcvr_pub_dst, &sata_key, &pota_key, &report_dst);
     let reseal = || {
         src_ev
-            .with_hsm_evidence(|src| {
+            .with_hsm_identity(|src| {
                 dst_ev.with_hsm_evidence(|dest| {
-                    session.sd_reseal_remote_backup(&policy, &masked_rcvr, src, dest, &src_backup)
+                    session.sd_reseal_remote_backup(
+                        &policy,
+                        &masked_rcvr,
+                        src,
+                        dest,
+                        &src_backup.pok_remote_backup,
+                    )
                 })
             })
             .expect("reseal remote backup")
@@ -136,7 +171,7 @@ fn sd_reseal_remote_backup_rerandomizes() {
     let first = reseal();
     let second = reseal();
     assert_ne!(
-        first, second,
+        first.backup, second.backup,
         "each reseal must re-randomize the HPKE encapsulation",
     );
 }

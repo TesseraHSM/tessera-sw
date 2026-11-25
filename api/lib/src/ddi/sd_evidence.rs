@@ -102,3 +102,32 @@ pub(crate) fn push_evidence<'a>(
         report: push_report(evidence.report, oob)?,
     })
 }
+
+/// Source identity descriptors; the signed backup carries the operation itself.
+pub(crate) struct IdentityDescriptors {
+    pub(crate) mfgr: Vec<CertDescriptor>,
+    pub(crate) owner: Vec<CertDescriptor>,
+    pub(crate) part_owner: Vec<CertDescriptor>,
+}
+
+/// Pack identity chains only. Firmware enforces the command's trust policy.
+pub(crate) fn push_identity_evidence<'a>(
+    evidence: &HsmSdIdentityEvidence<'a>,
+    oob: &mut Vec<&'a [u8]>,
+) -> HsmResult<IdentityDescriptors> {
+    let mut result = IdentityDescriptors {
+        mfgr: Vec::new(),
+        owner: Vec::new(),
+        part_owner: Vec::new(),
+    };
+    for (chain, descriptors) in [
+        (evidence.mfgr_cert_chain, &mut result.mfgr),
+        (evidence.owner_cert_chain, &mut result.owner),
+        (evidence.part_owner_cert_chain, &mut result.part_owner),
+    ] {
+        if !chain.is_empty() {
+            *descriptors = push_cert_chain(chain, oob, EVIDENCE_CHAIN_MAX_CERTS)?;
+        }
+    }
+    Ok(result)
+}
