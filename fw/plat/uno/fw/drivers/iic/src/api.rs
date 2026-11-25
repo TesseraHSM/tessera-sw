@@ -53,7 +53,8 @@ struct ChannelState {
 enum IcqPop {
     /// The ICQ is empty.
     Empty,
-    /// A failed entry was consumed and its slot recycled.
+    /// A failed entry was consumed and its slot recycled, or an entry that
+    /// names no receive buffer of this channel was dropped.
     Recycled,
     /// A successful entry was consumed.
     Ready(Received),
@@ -443,17 +444,23 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     ///
     /// Waits until an ICQ entry is available, copies metadata into the
     /// IO_META sidecar, and returns the IO_SQ slot index. Failed
-    /// entries (status != 0) are silently recycled.
+    /// entries (status != 0) are silently recycled, and entries that name
+    /// no receive buffer of this channel are dropped.
     ///
     /// When done, call [`free_io`](Self::free_io) to return the slot
     /// and grant credit back.
     pub fn recv(&self) -> impl core::future::Future<Output = Received> + '_ {
         poll_fn(move |cx| {
-            self.state.with(|s| match self.pop(s) {
-                IcqPop::Ready(rx) => Poll::Ready(rx),
-                IcqPop::Empty | IcqPop::Recycled => {
-                    s.waker.register(cx.waker());
-                    Poll::Pending
+            // Entries behind a recycled one may already be in the ICQ, with
+            // their interrupt taken, so keep consuming rather than wait.
+            self.state.with(|s| loop {
+                match self.pop(s) {
+                    IcqPop::Ready(rx) => return Poll::Ready(rx),
+                    IcqPop::Recycled => {}
+                    IcqPop::Empty => {
+                        s.waker.register(cx.waker());
+                        return Poll::Pending;
+                    }
                 }
             })
         })
@@ -480,7 +487,8 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     /// A successful entry has its metadata persisted into the IO_META
     /// sidecar and its IO_SQ slot index returned. A failed entry
     /// (status != 0) is recycled: its buffer returns to the ISQ and its
-    /// credit to the source queue.
+    /// credit to the source queue. An entry whose buffer address is not one
+    /// of this channel's receive buffers is dropped.
     fn pop(&self, s: &mut ChannelState) -> IcqPop {
         if !self.icq_pending(s) {
             return IcqPop::Empty;
@@ -490,13 +498,36 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         // SAFETY: The masked consumer index selects an available entry in the ICQ ring.
         let entry = unsafe { read_icq_entry(self.icq_ring.add(icq_slot)) };
 
-        let success = entry.status.success();
-        let index = self.buf_index(entry.buffer_addr());
-
         s.icq_head = (s.icq_head + 1) & Self::MASK;
         self.regs.icq_ch[self.channel as usize]
             .head
             .write(ICQ_CHANNEL_HEAD::HEAD.val(s.icq_head.into()));
+
+        // The buffer address comes from the hardware. Only one of this
+        // channel's receive buffers yields a valid slot index; any other
+        // address would index IO_META and the IO_SQ out of bounds. Drop such
+        // an entry: the buffer is not this channel's to post back to the
+        // ISQ, and nothing in the entry can be trusted to name the queue
+        // whose credit it took.
+        if !isq_addr_in_pool(
+            entry.addr_lo,
+            entry.addr_hi,
+            self.buf_addr(self.config.io_first),
+            self.buf_size,
+            u32::from(self.io_count()),
+        ) {
+            warn!(
+                "iic",
+                "recv dropped entry outside the buffer pool ch={} addr={:#x}:{:#x}",
+                self.channel,
+                entry.addr_hi,
+                entry.addr_lo
+            );
+            return IcqPop::Recycled;
+        }
+
+        let success = entry.status.success();
+        let index = self.buf_index(entry.buffer_addr());
 
         // Skip failed entries — recycle buffer and return credit
         if !success {
