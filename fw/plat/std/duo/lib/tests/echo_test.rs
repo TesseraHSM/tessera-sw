@@ -50,6 +50,7 @@ impl AlignedBuf {
     fn new(len: usize) -> Self {
         let layout = std::alloc::Layout::from_size_align(len, 4096)
             .expect("from size align operation should succeed");
+        // SAFETY: layout is valid and all test callers request a nonzero size.
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!ptr.is_null());
         Self { ptr, len }
@@ -57,11 +58,15 @@ impl AlignedBuf {
 
     #[allow(unsafe_code)]
     fn as_slice(&self) -> &[u8] {
+        // SAFETY: self owns a non-null allocation of len initialized bytes,
+        // valid for this borrow; &self prevents mutation through this buffer.
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 
     #[allow(unsafe_code)]
     fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: self owns a non-null allocation of len initialized bytes,
+        // and &mut self grants exclusive access for the returned slice's lifetime.
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 
@@ -76,6 +81,8 @@ impl Drop for AlignedBuf {
     fn drop(&mut self) {
         let layout = std::alloc::Layout::from_size_align(self.len, 4096)
             .expect("from size align operation should succeed");
+        // SAFETY: ptr is the live allocation owned by self, and layout matches
+        // the layout used to allocate it. Drop deallocates it exactly once.
         unsafe { std::alloc::dealloc(self.ptr, layout) };
     }
 }
