@@ -760,6 +760,7 @@ impl StdAes {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use tokio::runtime::Handle;
     use tsra_crypto::AesXtsAlgo;

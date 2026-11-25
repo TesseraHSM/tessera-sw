@@ -540,6 +540,7 @@ fn wire_coord_len(curve: EccCurve, form: EccForm) -> usize {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use tokio::runtime::Handle;
 

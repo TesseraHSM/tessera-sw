@@ -268,6 +268,7 @@ impl StdKdf {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use tokio::runtime::Handle;
 

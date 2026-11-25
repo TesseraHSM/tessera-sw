@@ -183,6 +183,7 @@ impl BufferPool {
     /// the bump allocator relies on; the Embassy executor is
     /// single-threaded, so once the handler returns no aliasing
     /// borrow can outlive it.
+    #[allow(unsafe_code)]
     pub fn free(&self, idx: u16) {
         let i = idx as usize;
         let nondma_hi = self.nondma_peaks[i].get().min(NONDMA_BUF_SIZE);
@@ -248,6 +249,10 @@ impl BufferPool {
     }
 }
 
+#[allow(unsafe_code)]
 // SAFETY: BufferPool is only accessed from the single-threaded Embassy executor.
 unsafe impl Send for BufferPool {}
+#[allow(unsafe_code)]
+// SAFETY: shared access is confined to the single-threaded Embassy executor;
+// the alloc/free protocol keeps live buffer allocations disjoint.
 unsafe impl Sync for BufferPool {}

@@ -632,6 +632,7 @@ fn mod_exp_input_in_range(n: &[u8], m: &[u8]) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use tokio::runtime::Handle;
 
