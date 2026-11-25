@@ -22,7 +22,7 @@ semihosting = ["dep:tsra_fw_uno_drivers_semihosting"]
 # captured SP) to the HardFault report. Off by default to keep the fault
 # path minimal — the default dump is a minimalist
 # register/CFSR report.
-fault-stackdump = []
+fault-stackdump = ["dep:tsra_fw_uno_trace"]
 
 [dependencies]
 cortex-m.workspace = true
@@ -38,7 +38,7 @@ tsra_fw_uno_error.workspace = true
 tsra_fw_uno_pac.workspace = true
 tsra_fw_uno_reg_cortex_m.workspace = true
 tsra_fw_uno_reg_soc.workspace = true
-tsra_fw_uno_trace.workspace = true
+tsra_fw_uno_trace = { optional = true, workspace = true }
 
 [lints]
 workspace = true

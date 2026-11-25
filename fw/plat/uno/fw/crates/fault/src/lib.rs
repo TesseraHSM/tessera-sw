@@ -9,9 +9,10 @@
 //! *visibility*: the default `cortex-m-rt` HardFault handler is a silent
 //! infinite loop, so a bus fault (for example, a stray write to a read-only
 //! peripheral register) escalates to HardFault and hangs the core with no
-//! output. These handlers instead dump the fault cause — decoded `CFSR`
-//! bits, the faulting address (`BFAR`/`MMFAR`), the stacked register frame,
-//! and `MSP` — so a fault is diagnosable from the serial log.
+//! output. The panic and HardFault handlers instead save a crash dump, which
+//! keeps the failure code, the registers that the handler captures, and
+//! `CFSR`, `MMFAR`, and `BFAR`, and then log the crash; `DefaultHandler`
+//! logs the exception number.
 //!
 //! # Output via the tracing facade
 //!
@@ -21,23 +22,35 @@
 //! with every other trace.
 //!
 //! The FIPS error-state paths and the unexpected-exception handler log with
-//! `error!`, so a build with debug-log output records them. The panic,
-//! HardFault, and explicit-crash handlers print text only (`error_text!`) and
-//! write no record: the crash dump that each saves keeps the failure code,
-//! the registers it captures, and `CFSR`, `MMFAR`, and `BFAR`. Their other
-//! lines, such as `HFSR` and the decoded fault bits, show only in text
-//! output.
+//! `error!`, so a build with debug-log output records them. So do the panic,
+//! HardFault, and explicit-crash handlers, each with one call: its marker,
+//! with no value. The crash dump that each saves keeps the failure code, the
+//! registers it captures, and `CFSR`, `MMFAR`, and `BFAR`. A HardFault logs
+//! the same marker after a stack overflow; the dump's `CFSR` shows the
+//! cause. Only the development stack dump (`fault-stackdump`) prints with
+//! `error_text!`, which never records, because no record may hold stack
+//! contents.
 //!
-//! The panic, HardFault, and explicit-crash handlers print after they save
-//! the crash dump. With UART output, a line waits for the UART lock, a GSRAM
-//! word that a stopped core can hold forever, and a HardFault can be an
-//! escalated bus error in GSRAM; printing last keeps the dump safe. The FIPS
-//! error-state paths log first, and then run `dmb`, before they save a crash
-//! dump, notify the peer core, or set Mailbox0's error bit: those writes lead
-//! the SP to drain the ring, so the record's `tail` write must come first.
-//! For the same reason, the panic, HardFault, and explicit-crash handlers run
-//! `dmb` before they notify the peer core, so a record written before the
-//! crash, such as the pre-operational self-test's, comes first.
+//! The panic, HardFault, and explicit-crash handlers log after they save the
+//! crash dump. A record goes to the ring in GSRAM, and with UART output, a
+//! line waits for the UART lock, a GSRAM word that a stopped core can hold
+//! forever; a HardFault can be an escalated bus error in GSRAM, so logging
+//! last keeps the dump safe. The FIPS error-state paths log first, and then
+//! run `dmb`, before they save a crash dump, notify the peer core, or set
+//! Mailbox0's error bit: those writes lead the SP to drain the ring, so the
+//! record's `tail` write must come first. For the same reason, the panic,
+//! HardFault, and explicit-crash handlers run `dmb` before they notify the
+//! peer core, so a record written before the crash, such as the
+//! pre-operational self-test's, comes first.
+//!
+//! Two limits remain. A fault while the panic's or the explicit crash's
+//! record is written, such as a bus error in the ring, enters the HardFault
+//! handler, which saves its own dump over the first one: the dump then shows
+//! a HardFault in the ring writer instead of the first crash. A fault inside
+//! the HardFault handler locks the core up instead, so the HardFault's dump
+//! stays. And a stack overflow is best effort: `cortex-m-rt` enters the
+//! HardFault handler on the stack that overflowed, so the handler, the dump,
+//! and the record all run on it.
 //!
 //! Each handler logs at error level with an exception-specific `HsmError`
 //! code — [`HsmError::Panic`], [`HsmError::HardFault`],
@@ -81,8 +94,6 @@
 #![no_std]
 #![allow(unsafe_code)]
 
-mod decode;
-
 use core::arch::global_asm;
 
 use cortex_m_rt::exception;
@@ -111,6 +122,7 @@ use tsra_fw_uno_reg_soc::sys_mbx::regs::SysMbxRegs;
 use tsra_fw_uno_reg_soc::sys_mbx::S2H_MBX_INSTS;
 #[cfg(not(feature = "semihosting"))]
 use tsra_fw_uno_reg_soc::sys_mbx::SYS_MBX_BASE;
+#[cfg(feature = "fault-stackdump")]
 use tsra_fw_uno_trace::error_text;
 
 /// Mailbox0, which the SP watches for this core's error interrupt.
@@ -249,8 +261,8 @@ pub fn explicit_crash(additional_info: Option<&str>) -> ! {
         additional_info,
     );
 
-    // Print only after the dump is saved: see the module docs.
-    error_text!(
+    // Log only after the dump is saved: see the module docs.
+    error!(
         "explicit_crash",
         HsmError::ExplicitCrash,
         "#### EXPLICIT CRASH ####"
@@ -297,8 +309,8 @@ fn fips_halt() -> ! {
 /// Firmware panic handler.
 ///
 /// Notifies the peer core of the crash over TCON wakeup1, captures a
-/// persistent crash dump, and then reports the panic through the tracing
-/// facade before halting.
+/// persistent crash dump, and then logs `#### PANIC ####` with no value
+/// before halting.
 ///
 /// # Why the dump carries real registers, not the panic site
 ///
@@ -315,18 +327,15 @@ fn fips_halt() -> ! {
 /// crash_dump_arm`). The dump identifies the crash as a panic via
 /// [`FailureCode::Panic`], but it does not locate the panic *site*: `pc`
 /// points into this handler, which the panic site reaches three frames down
-/// through `core::panicking::panic_fmt`. On a `trace-uart` bring-up build
-/// the `error_text!` below still prints the full panic message and source
-/// location.
+/// through `core::panicking::panic_fmt`. No build prints the panic message
+/// or its location either: that reads `PanicInfo` too, at the same cost.
 ///
 /// TODO: recover the panic site by unwinding the `r7` frame-pointer chain,
 /// and/or capture it from `PanicInfo` once the ITCM budget allows — most
 /// likely by relocating `.rodata` to GSRAM rather than by trimming code.
 #[panic_handler]
-// `info` is consumed only by `error_text!`, which compiles out unless a trace
-// level is enabled. It is deliberately not read otherwise; see above.
-#[allow(unused_variables)]
-fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+// `_info` is deliberately not read; see above.
+fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     // Disable our own wakeup1 receiver before firing it at the peer core, so
     // the notification we are about to raise cannot recurse back into this
     // already-crashing core.
@@ -340,24 +349,22 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 
     crashdump_save(&capture_register_context(), FailureCode::Panic, None);
 
-    // Print only after the dump is saved: see the module docs.
-    error_text!("panic", HsmError::Panic, "#### PANIC ####");
-    error_text!("panic", HsmError::Panic, "{}", info);
+    // Log only after the dump is saved: see the module docs.
+    error!("panic", HsmError::Panic, "#### PANIC ####");
 
     halt();
 }
 
 /// HardFault exception handler.
 ///
-/// Reads the SCB fault-status registers, classifies the fault, and dumps:
-/// decoded `CFSR` bits, the faulting address when valid, the stacked
-/// [`ExceptionFrame`] (R0-R3, R12, LR, PC, xPSR), and `MSP`. A stack
-/// overflow (`HFSR.FORCED` + `CFSR.MSTKERR`/`STKERR`) is reported specially
-/// because exception stacking failed and the frame is unreliable.
-///
-/// After it notifies the peer core over TCON wakeup1 and captures a
-/// persistent crash dump (mirroring the reference handler), it reports the
-/// fault and halts.
+/// Reads the SCB fault-status registers and classifies the fault. It
+/// notifies the peer core over TCON wakeup1 and captures a persistent crash
+/// dump (mirroring the reference handler) with the stacked
+/// [`ExceptionFrame`]'s registers, or with `MSP` after a stack overflow
+/// (`HFSR.FORCED` + `CFSR.MSTKERR`/`STKERR`), when exception stacking failed
+/// and the frame is unreliable. Then it logs `#### HardFault ####` with no
+/// value, runs the development stack dump if `fault-stackdump` is on and the
+/// frame is reliable, and halts.
 ///
 /// # Safety
 ///
@@ -365,16 +372,9 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 /// hardware exception mechanism on a HardFault and must never be called
 /// directly; it reads fixed architectural SCB registers and the
 /// hardware-supplied exception frame, then halts.
-//
-// Some register values below are used only by text output, so they're unused
-// without it; allow keeps that build warning-free. Persistent crash capture
-// remains active.
-#[allow(unused_variables)]
 #[exception]
 unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
     let scb = scb();
-    let cfsr = scb.cfsr.get();
-    let hfsr = scb.hfsr.get();
     let msp = cortex_m::register::msp::read();
 
     let forced = scb.hfsr.is_set(HFSR::FORCED);
@@ -388,9 +388,9 @@ unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
     // ---- Crash capture + cross-core notify -------------------------------
     // Mirrors the reference `exception_handlers::HardFault`.
     // Classification uses the reference's FORCED+MSTKERR predicate so the
-    // shared SP parser records the same `failure_code`; note the diagnostic
-    // logging below intentionally treats the broader FORCED+(MSTKERR|STKERR)
-    // as an unreliable-frame overflow for operator visibility.
+    // shared SP parser records the same `failure_code`; note the dump's
+    // context and the development stack dump below intentionally treat the
+    // broader FORCED+(MSTKERR|STKERR) as an unreliable-frame overflow.
     let failure_code = if forced && mstkerr {
         FailureCode::MemoryFault
     } else {
@@ -423,59 +423,12 @@ unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
     };
     crashdump_save(&context, failure_code, None);
 
-    // Print only after the dump is saved: see the module docs.
-    error_text!("fault", HsmError::HardFault, "#### HardFault ####");
+    // Log only after the dump is saved: see the module docs.
+    error!("fault", HsmError::HardFault, "#### HardFault ####");
 
-    if forced && (mstkerr || stkerr) {
-        // Exception-entry stacking failed and escalated to HardFault: the
-        // CPU could not push {R0-R3,R12,LR,PC,xPSR}, so `ef` is garbage. The
-        // faulting PC/LR are unrecoverable on ARMv7-M; only MSP locates
-        // where the stack was when it overran its guard region.
-        error_text!(
-            "fault",
-            HsmError::HardFault,
-            "cause: stack overflow (exception frame unreliable)"
-        );
-        error_text!(
-            "fault",
-            HsmError::HardFault,
-            "MSP={:#010x} CFSR={:#010x} HFSR={:#010x}",
-            msp,
-            cfsr,
-            hfsr
-        );
-    } else {
-        decode::report_cfsr(scb, HsmError::HardFault);
-
-        if scb.cfsr.is_set(CFSR::BFARVALID) {
-            error_text!(
-                "fault",
-                HsmError::HardFault,
-                "BFAR={:#010x}  (faulting bus address)",
-                scb.bfar.get()
-            );
-        }
-        if scb.cfsr.is_set(CFSR::MMARVALID) {
-            error_text!(
-                "fault",
-                HsmError::HardFault,
-                "MMFAR={:#010x} (faulting memory address)",
-                scb.mmfar.get()
-            );
-        }
-
-        error_text!(
-            "fault",
-            HsmError::HardFault,
-            "CFSR={:#010x} HFSR={:#010x} MSP={:#010x}",
-            cfsr,
-            hfsr,
-            msp
-        );
-        // The crash dump, saved above, keeps the PC and LR.
-        error_text!("fault", HsmError::HardFault, "frame: {:#?}", ef);
-
-        #[cfg(feature = "fault-stackdump")]
+    // The development stack dump runs only when exception stacking succeeded.
+    #[cfg(feature = "fault-stackdump")]
+    if !(forced && (mstkerr || stkerr)) {
         // SAFETY: The development-only dump intentionally probes the faulting stack before halting.
         unsafe {
             stack_dump(msp);

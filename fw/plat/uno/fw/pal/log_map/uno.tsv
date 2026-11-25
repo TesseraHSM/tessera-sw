@@ -65,3 +65,6 @@
 51	uno	E+	tsra_fw_uno_pal	selftest	bulk AES-GCM encrypt KAT mismatch
 52	uno	E+	tsra_fw_uno_pal	selftest	bulk AES-XTS decrypt KAT mismatch
 53	uno	E+	tsra_fw_uno_pal	selftest	bulk AES-XTS encrypt KAT mismatch
+54	uno	E+	tsra_fw_uno_fault	fault	#### HardFault ####
+55	uno	E+	tsra_fw_uno_fault	panic	#### PANIC ####
+56	uno	E+	tsra_fw_uno_fault	explicit_crash	#### EXPLICIT CRASH ####

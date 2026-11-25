@@ -18,7 +18,6 @@ use tsra_fw_uno_reg_soc::iic::regs::IicRegs;
 use tsra_fw_uno_reg_soc::iic::IIC_BASE;
 use tsra_fw_uno_reg_soc::iic::*;
 use tsra_fw_uno_trace::tracing::*;
-use tsra_fw_uno_trace::warn_text;
 
 use crate::ChannelConfig;
 use crate::IcqEntry;
@@ -505,15 +504,6 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             warn!(
                 "iic",
                 "recv FAILED: ch={} cause={:#010x}", self.channel, _cause
-            );
-            // A record holds two values, so the rest print only as text.
-            warn_text!(
-                "iic",
-                "recv FAILED: qid={} slot={} addr={:#x} axi_id={}",
-                queue_id,
-                index,
-                entry.buffer_addr(),
-                entry.info.axi_id()
             );
             self.free_io_in(s, index, queue_id);
             return IcqPop::Recycled;

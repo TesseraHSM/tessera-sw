@@ -85,6 +85,9 @@ static const char *const tsra_log_uno_messages[256] = {
     [51] = "[selftest] bulk AES-GCM encrypt KAT mismatch [err:%08x]",
     [52] = "[selftest] bulk AES-XTS decrypt KAT mismatch [err:%08x]",
     [53] = "[selftest] bulk AES-XTS encrypt KAT mismatch [err:%08x]",
+    [54] = "[fault] #### HardFault #### [err:%08x]",
+    [55] = "[panic] #### PANIC #### [err:%08x]",
+    [56] = "[explicit_crash] #### EXPLICIT CRASH #### [err:%08x]",
 };
 
 #endif /* TSRA_LOG_MESSAGES_H */
