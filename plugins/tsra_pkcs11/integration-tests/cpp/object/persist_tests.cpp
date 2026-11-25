@@ -61,24 +61,29 @@ CK_RV create_data(
     return p11()->C_CreateObject(s, tmpl, sizeof(tmpl) / sizeof(tmpl[0]), out);
 }
 
-/// The objects `s` finds by `label`.
+/// The objects `s` finds by `label`. A failed search fails the test, so it never
+/// passes for an empty result.
 std::vector<CK_OBJECT_HANDLE> find_label(CK_SESSION_HANDLE s, const char *label)
 {
     std::vector<CK_OBJECT_HANDLE> out;
     CK_ATTRIBUTE by_label = { CKA_LABEL,
                               const_cast<char *>(label),
                               static_cast<CK_ULONG>(std::strlen(label)) };
-    if (p11()->C_FindObjectsInit(s, &by_label, 1) != CKR_OK)
+    CK_RV rv = p11()->C_FindObjectsInit(s, &by_label, 1);
+    EXPECT_CKR_OK(rv) << "searching for " << label;
+    if (rv != CKR_OK)
     {
         return out;
     }
     CK_OBJECT_HANDLE found[8];
     CK_ULONG n = 0;
-    if (p11()->C_FindObjects(s, found, 8, &n) == CKR_OK)
+    rv = p11()->C_FindObjects(s, found, std::size(found), &n);
+    EXPECT_CKR_OK(rv) << "searching for " << label;
+    if (rv == CKR_OK)
     {
         out.assign(found, found + n);
     }
-    (void)p11()->C_FindObjectsFinal(s);
+    EXPECT_CKR_OK(p11()->C_FindObjectsFinal(s)) << "the search for " << label << " ends";
     return out;
 }
 

@@ -68,11 +68,14 @@ std::vector<CK_OBJECT_HANDLE> find_by_label(CK_SESSION_HANDLE s, const char *lab
     }
     std::vector<CK_OBJECT_HANDLE> batch(page);
     CK_ULONG n = 0;
-    while ((p11()->C_FindObjects(s, batch.data(), page, &n) == CKR_OK) && (n > 0))
+    rv = p11()->C_FindObjects(s, batch.data(), page, &n);
+    while ((rv == CKR_OK) && (n > 0))
     {
         found.insert(found.end(), batch.begin(), batch.begin() + n);
+        rv = p11()->C_FindObjects(s, batch.data(), page, &n);
     }
-    (void)p11()->C_FindObjectsFinal(s);
+    EXPECT_CKR_OK(rv) << "a failed search finds only part of the objects";
+    EXPECT_CKR_OK(p11()->C_FindObjectsFinal(s)) << "the search ends";
     return found;
 }
 

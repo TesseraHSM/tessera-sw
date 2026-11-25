@@ -141,8 +141,13 @@ if [ -f "$HSMMOD" ]; then
     echo; echo "== emulator-backed: gtest functional suite (integration-tests/cpp) =="
     # googletest and Wycheproof are fetched by CMake. Cache only their SOURCE
     # between runs and let every build tree compile privately: a shared build
-    # directory breaks as soon as one of the trees using it goes away.
-    deps="${XDG_CACHE_HOME:-$HOME/.cache}/tsra-pkcs11-cpp-deps"
+    # directory breaks as soon as one of the trees using it goes away. CMake
+    # skips URL_HASH for a source handed to it, so the cache is keyed by the
+    # FetchContent declarations: a new pin is fetched and checked again. Old
+    # pins stay in the cache until it is removed.
+    pins="$(sed -n '/^FetchContent_Declare(/,/^)/p' "$PLUGIN/integration-tests/cpp/CMakeLists.txt" \
+        | sha256sum | cut -d ' ' -f 1)"
+    deps="${XDG_CACHE_HOME:-$HOME/.cache}/tsra-pkcs11-cpp-deps/$pins"
     src_arg=()
     for dep in googletest wycheproof; do
         if [ -d "$deps/$dep-src" ]; then
