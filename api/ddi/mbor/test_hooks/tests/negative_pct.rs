@@ -10,7 +10,7 @@
 //! the FIPS error state: CP1 halts with the operation in flight and the device
 //! resets. The test then waits and checks that the device has recovered.
 //!
-//! | Test | Kind | Operation after arming | Firmware log code |
+//! | Test | Kind | Operation after arming | PCT failure code |
 //! |---|---|---|---|
 //! | `ecc_keygen_p*_sign_pct_failure` | `EccKeyGen` | `EccGenerateKeyPair`, sign/verify | `PctValidationEccGenKeyFailed` |
 //! | `ecc_keygen_p*_ecdh_pct_failure` | `EccKeyGen` | `EccGenerateKeyPair`, derive | `PctValidationEccGenKeyFailed` |
@@ -19,10 +19,10 @@
 //! | `establish_cred_key_pct_failure_on_nssr` | `EstablishCredKey` | `erase()` (NSSR) | `PctValidationEstablishCredEncKeyFailed` |
 //! | `session_enc_key_pct_failure_on_nssr` | `SessionEncKey` | `erase()` (NSSR) | `PctValidationSessionEncKeyFailed` |
 //!
-//! The host sees every failure the same way, as an aborted or failed
-//! operation, so the firmware log code is what shows which PCT failed. The
-//! CP1 debug log (`debuglogread`) records it as message 238 (PCT injected,
-//! `arg1` = kind) followed by 242 (FIPS error state, `arg1` = log code).
+//! The host sees every failure the same way: the operation is aborted or
+//! fails, and the device then resets once (a soft reset in `debuglogread`).
+//! The PCT failure code is not reported to the host; confirming it needs a
+//! CP1 image with trace or debug-log instrumentation.
 //!
 //! An NSSR regenerates the partition identity, establish-credential and
 //! session-encryption keys, each with its PCT, so `erase()` is the operation
@@ -32,8 +32,8 @@
 //! The three NSSR tests are **manual** (`#[ignore]`). The module halts while
 //! the NSSR itself is in flight, so the driver's NSSR request fails (for
 //! example with `ETIMEDOUT`) and the driver does not re-attach to the device
-//! after it resets. Run one with `--ignored`, confirm the 238/242 records in
-//! the debug log, then reload the driver before running anything else.
+//! after it resets. Run one with `--ignored`, confirm the soft reset in
+//! `debuglogread`, then reload the driver before running anything else.
 //!
 //! Behaviour on this firmware:
 //! - Requires a **physical** device; virtual and mock devices are skipped.
@@ -253,8 +253,8 @@ fn ecc_keygen_pct_failure(
 ///
 /// The halt interrupts the NSSR itself, so how the failure surfaces depends
 /// on the driver (typically `ETIMEDOUT`), and the driver stays detached once
-/// the device has reset. Recovery therefore isn't checked here; the debug log
-/// confirms which PCT failed.
+/// the device has reset. Recovery therefore isn't checked here; the soft
+/// reset in `debuglogread` confirms the halt.
 ///
 /// The setup session is closed before the NSSR. An NSSR keeps established
 /// sessions for renegotiation and the halted device then warm-resets, which
@@ -278,10 +278,7 @@ fn nssr_pct_failure(
         Err(err) => println!("erase (NSSR) failed as expected: {err:?}"),
         Ok(()) => panic!("erase (NSSR) unexpectedly succeeded"),
     }
-    println!(
-        "Check debuglogread for message 238 (arg1 = {}) then 242, and reload the driver.",
-        kind.0
-    );
+    println!("Check debuglogread for a single soft reset, then reload the driver.");
 }
 
 /// Cleanup for the NSSR tests: the test already closed its session, and the

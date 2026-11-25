@@ -345,9 +345,10 @@ impl UnoHsmPal {
 
     /// Runs the unwrapping key's PCT with negative-PCT injection.
     ///
-    /// The same test as `UnoHsmPal::unwrapping_key_pct`: RSA-2048,
-    /// encrypt/decrypt, against the `n ‖ e` that `key` stores. When the
-    /// requesting IO's partition is armed for [`NegPctKind::UnwrappingKey`]
+    /// What `UnoHsmPal::unwrapping_key_pct` runs in these builds: the same
+    /// RSA-2048 encrypt/decrypt test, against the `n ‖ e` that `key` stores.
+    /// When the requesting IO's partition is armed for
+    /// [`NegPctKind::UnwrappingKey`]
     /// and its count is used up, `n` is replaced with a substitute modulus,
     /// so the round trip no longer returns its input and the test fails.
     ///

@@ -35,8 +35,6 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
-use tsra_fw_hsm_pal_traits::HsmRsaKey;
-use tsra_fw_hsm_pal_traits::HsmRsaPct;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
@@ -84,17 +82,27 @@ impl Drop for PctReservation<'_> {
 
 impl UnoHsmPal {
     /// Runs the unwrapping key's PCT on `key`: the encrypt/decrypt form for an
-    /// RSA-2048 key in the PKA's layout, `d ‖ n ‖ e`.
+    /// RSA-2048 key in the PKA's layout, `d ‖ n ‖ e`. Negative-PCT test builds
+    /// run it with failure injection (`neg_pct_unwrapping_key_pct`), so every
+    /// unwrapping-key PCT can consume an `UnwrappingKey` arm.
     ///
-    /// Returns the future of [`rsa_key_pct`](Self::rsa_key_pct) directly. An
-    /// `async fn` that awaited it would wrap it in another state machine, which
-    /// makes the release image larger.
+    /// Returns the PCT's future directly. An `async fn` that awaited it would
+    /// wrap it in another state machine, which makes the release image larger.
     pub(crate) fn unwrapping_key_pct<'a>(
         &'a self,
         io: &'a UnoHsmIo,
         key: &'a HsmDmaBuf,
     ) -> impl Future<Output = HsmResult<bool>> + 'a {
-        self.rsa_key_pct(io, key, HsmRsaKey::Rsa2048Priv, HsmRsaPct::EncryptDecrypt)
+        #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
+        let pct = self.neg_pct_unwrapping_key_pct(io, key);
+        #[cfg(not(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks")))]
+        let pct = self.rsa_key_pct(
+            io,
+            key,
+            tsra_fw_hsm_pal_traits::HsmRsaKey::Rsa2048Priv,
+            tsra_fw_hsm_pal_traits::HsmRsaPct::EncryptDecrypt,
+        );
+        pct
     }
 
     /// Certifies the SP-published unwrapping key of `io`'s partition.
@@ -161,9 +169,6 @@ impl UnoHsmPal {
                 return;
             };
             key.copy_from_slice(part.unwrapping_key_bk());
-            #[cfg(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
-            let result = self.neg_pct_unwrapping_key_pct(io, key).await;
-            #[cfg(not(all(feature = "tsra_test_hooks", feature = "fips_validation_hooks")))]
             let result = self.unwrapping_key_pct(io, key).await;
 
             // Nothing below awaits, so no teardown can run before the slot is
@@ -227,7 +232,7 @@ impl UnoHsmPal {
                 return;
             };
             key.copy_from_slice(active);
-            let result = self.neg_pct_unwrapping_key_pct(io, key).await;
+            let result = self.unwrapping_key_pct(io, key).await;
 
             // Nothing below awaits, so the partition can't change before the
             // result is applied.
