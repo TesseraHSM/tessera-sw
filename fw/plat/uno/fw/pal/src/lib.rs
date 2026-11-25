@@ -51,6 +51,7 @@ mod gsram_alias;
 mod io;
 mod ipc;
 mod lock;
+mod log;
 #[allow(unsafe_code)]
 mod pal;
 mod part;
@@ -66,6 +67,7 @@ mod vault;
 
 pub use io::*;
 pub use ipc::*;
+pub use log::UnoLog;
 pub use pal::*;
 pub use tsra_fw_hsm_pal_traits::HsmAlloc;
 /// Re-export of the PAL trait types consumed by uno-PAL users.

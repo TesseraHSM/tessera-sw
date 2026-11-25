@@ -122,6 +122,9 @@ pub fn emit(level: u8, target: &str, args: fmt::Arguments<'_>) {
     let tick = read_tick();
     let task_id = read_task_id();
 
+    // Held until `w` flushes the line: locals drop in reverse order.
+    #[cfg(feature = "backend-uart")]
+    let _line = crate::lock::Line::take();
     let mut w = FlushWriter::new();
 
     // Format: [L TTTTTTTT TARGET  :TASKID  ]

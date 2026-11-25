@@ -68,6 +68,7 @@ use tsra_fw_uno_pac as _;
 use tsra_fw_uno_pal::BootPhase;
 use tsra_fw_uno_pal::UnoHsmIo;
 use tsra_fw_uno_pal::UnoHsmPal;
+use tsra_fw_uno_pal::UnoLog;
 
 // Placeholder so the linker emits a non-empty `.data` section.
 //
@@ -318,6 +319,8 @@ fn main() -> ! {
     // `entry` hands this to `main`, which runs once, as a `&'static mut`.
     static mut EXECUTOR: MaybeUninit<raw::Executor> = MaybeUninit::uninit();
 
+    // Reset the debug-log ring before the first log.
+    UnoLog::boot_reset();
     info!("app", "Tessera Integrated HSM firmware starting up...");
     let _ = HSM.init(Hsm::new(UnoHsmPal::default()));
     let hsm = HSM.try_get();

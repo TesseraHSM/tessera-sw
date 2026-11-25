@@ -8,9 +8,11 @@ members = [
   "crates/bulk_copy",
   "crates/cert_blob",
   "crates/crashdump",
+  "crates/debug_log",
   "crates/error",
   "crates/fault",
   "crates/key_vault",
+  "crates/log_ring",
   "crates/pct",
   "crates/single_cell",
   "crates/static_init",
@@ -56,6 +58,7 @@ tsra_fw_uno_cert_blob = { path = "crates/cert_blob" }
 tsra_fw_uno_crashdump = { path = "crates/crashdump" }
 tsra_fw_uno_reg_cortex_m = { path = "reg/cortex-m" }
 
+tsra_fw_uno_debug_log = { path = "crates/debug_log" }
 tsra_fw_uno_drivers_aes = { path = "drivers/aes" }
 tsra_fw_uno_drivers_bcp = { path = "drivers/bcp" }
 tsra_fw_uno_drivers_bks_store = { path = "drivers/bks_store" }
@@ -82,6 +85,7 @@ tsra_fw_uno_drivers_vault = { path = "drivers/vault" }
 tsra_fw_uno_error = { path = "crates/error" }
 tsra_fw_uno_fault = { path = "crates/fault" }
 tsra_fw_uno_key_vault = { path = "crates/key_vault" }
+tsra_fw_uno_log_ring = { path = "crates/log_ring" }
 tsra_fw_uno_pac = { path = "drivers/pac" }
 tsra_fw_uno_pal = { path = "pal" }
 tsra_fw_uno_pct = { path = "crates/pct" }
@@ -99,6 +103,7 @@ tsra_fw_hsm_core = { default-features = false, path = "../../../core/lib" }
 tsra_fw_hsm_core_tracing = { path = "../../../core/tracing" }
 tsra_fw_hsm_io = { path = "../../crates/io" }
 tsra_fw_hsm_pal_traits = { path = "../../../pal/traits" }
+tsra_log_map = { path = "../crates/log_map" }
 
 bitfield-struct = "0.13.0"
 cortex-m = { features = ["inline-asm"], version = "0.7.7" }

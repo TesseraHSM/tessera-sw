@@ -1,0 +1,21 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2024"
+name = "tsra_fw_uno_log_ring"
+version = "0.1.0"
+
+[lib]
+bench = false
+doctest = false
+
+[dependencies]
+critical-section = { workspace = true }
+tsra_fw_uno_reg_soc = { workspace = true }
+
+[dev-dependencies]
+critical-section = { features = ["std"], workspace = true }
+
+[lints]
+workspace = true

@@ -117,9 +117,8 @@ impl HsmMlDsa for UnoHsmPal {
                 error!(
                     "pqc",
                     HsmError::InvalidArg,
-                    "pal: mldsa_gen_keypair bad seed_len={} (want {})",
-                    seed.len(),
-                    MLDSA_SEED_LEN
+                    "pal: mldsa_gen_keypair bad seed_len={}",
+                    seed.len()
                 );
                 return Err(HsmError::InvalidArg);
             }
@@ -132,11 +131,7 @@ impl HsmMlDsa for UnoHsmPal {
                 error!(
                     "pqc",
                     HsmError::InvalidArg,
-                    "pal: mldsa_gen_keypair short buffers sk_len={} (want {}) pk_len={} (want {})",
-                    sk.len(),
-                    sk_len,
-                    pk.len(),
-                    pk_len
+                    "pal: mldsa_gen_keypair buffer too short"
                 );
                 return Err(HsmError::InvalidArg);
             }
@@ -352,9 +347,8 @@ impl HsmMlKem for UnoHsmPal {
                 error!(
                     "pqc",
                     HsmError::InvalidArg,
-                    "pal: mlkem_gen_keypair bad seed_len={} (want {})",
-                    seed.len(),
-                    MLKEM_SEED_LEN
+                    "pal: mlkem_gen_keypair bad seed_len={}",
+                    seed.len()
                 );
                 return Err(HsmError::InvalidArg);
             }
@@ -365,11 +359,7 @@ impl HsmMlKem for UnoHsmPal {
                 error!(
                     "pqc",
                     HsmError::InvalidArg,
-                    "pal: mlkem_gen_keypair short buffers sk_len={} (want {}) pk_len={} (want {})",
-                    sk.len(),
-                    sk_len,
-                    pk.len(),
-                    pk_len
+                    "pal: mlkem_gen_keypair buffer too short"
                 );
                 return Err(HsmError::InvalidArg);
             }

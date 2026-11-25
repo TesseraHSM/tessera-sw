@@ -25,6 +25,7 @@ tsra_fw_static_init = { workspace = true }
 tsra_fw_static_ref = { workspace = true }
 tsra_fw_uno_aes_sgl = { workspace = true }
 tsra_fw_uno_cert_blob = { workspace = true }
+tsra_fw_uno_debug_log = { workspace = true }
 tsra_fw_uno_drivers_aes = { workspace = true }
 tsra_fw_uno_drivers_bcp = { workspace = true }
 tsra_fw_uno_drivers_bks_store = { workspace = true }
@@ -49,11 +50,17 @@ tsra_fw_uno_drivers_vault = { workspace = true }
 tsra_fw_uno_error = { workspace = true }
 tsra_fw_uno_fault = { workspace = true }
 tsra_fw_uno_key_vault = { workspace = true }
+tsra_fw_uno_log_ring = { workspace = true }
 tsra_fw_uno_pac = { workspace = true }
 tsra_fw_uno_pct = { workspace = true }
 tsra_fw_uno_reg_soc = { workspace = true }
-tsra_fw_uno_trace = { workspace = true }
+# `debug-log` records `error!`, `warn!`, and `info!` calls in the debug-log
+# ring. A `level-*` feature (the app's trace flavors) also prints those at or
+# above its level as text.
+tsra_fw_uno_trace = { features = ["debug-log"], workspace = true }
 
+cortex-m = { workspace = true }
+critical-section = { workspace = true }
 embassy-futures = { workspace = true }
 embassy-sync = { workspace = true }
 embassy-time = { workspace = true }

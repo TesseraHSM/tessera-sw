@@ -683,9 +683,9 @@ const CRASH_MAGIC: u32 = 0x4650_4352;
 
 /// Why a fastpath core stopped, as it managed to report on its way down.
 ///
-/// The fields mirror the hardware crash record and are consumed by the
-/// `error!` diagnostics in `engine`, which compile out when no trace
-/// backend is selected -- hence the `dead_code` allowance.
+/// The fields mirror the hardware crash record. The diagnostics in `engine`
+/// record `kind` with `error!`, which compiles out when logging is off;
+/// nothing reads the other fields -- hence the `dead_code` allowance.
 #[allow(dead_code)]
 pub struct CrashRecord {
     /// 1 = hard fault (MemManage, BusFault and UsageFault all escalate

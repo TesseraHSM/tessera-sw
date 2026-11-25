@@ -816,34 +816,15 @@ impl PqcEngine<'_> {
         error!(
             "pqc",
             PqcError::FP_NOT_READY,
-            "engine {} (FP{}) did not answer seq={} within the deadline",
-            self.id.raw(),
-            self.id.core(),
-            seq
+            "engine did not answer: engine={}",
+            self.id.raw()
         );
         // A core that faulted or panicked leaves a record on its way down.
         // Without this the timeout above is all anyone ever sees, and a
         // stack overflow is indistinguishable from a core that is merely
         // busy.
-        // Bound with a leading underscore because the only reader is the
-        // `error!` below, which compiles to nothing unless a trace backend
-        // is enabled; without this the fields look unused in default builds.
         if let Some(_c) = mailbox::crash_record(self.id) {
-            error!(
-                "pqc",
-                PqcError::FP_NOT_READY,
-                "FP{} crashed: kind={} pc={:#010x} lr={:#010x} sp={:#010x} cfsr={:#010x} hfsr={:#010x} mmfar={:#010x} bfar={:#010x} stack_free={}",
-                self.id.core(),
-                _c.kind,
-                _c.pc,
-                _c.lr,
-                _c.sp,
-                _c.cfsr,
-                _c.hfsr,
-                _c.mmfar,
-                _c.bfar,
-                _c.stack_free as i32
-            );
+            error!("pqc", PqcError::FP_NOT_READY, "FP crash: kind={}", _c.kind);
         }
         Err(PqcError::FP_NOT_READY)
     }
