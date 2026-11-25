@@ -77,13 +77,10 @@ impl<P: HsmPal> Hsm<P> {
         let mut credential_guard = None;
 
         let op_result = match io.sqe().opcode() {
-            OP_MBOR => match self.bind_undo(&io) {
-                Ok(log) => {
-                    self.handle_mbor_op(&mut io, undo.insert(log), &mut credential_guard)
-                        .await
-                }
-                Err(e) => Err(e),
-            },
+            OP_MBOR => {
+                self.handle_mbor_op(&mut io, &mut undo, &mut credential_guard)
+                    .await
+            }
             OP_TBOR => {
                 self.handle_tbor_op(&mut io, &mut undo, &mut credential_guard)
                     .await
@@ -263,9 +260,13 @@ impl<P: HsmPal> Hsm<P> {
     async fn handle_mbor_op<'s>(
         &'s self,
         io: &mut P::Io,
-        undo: &mut UndoLog<'s>,
+        undo: &mut Option<UndoLog<'s>>,
         credential_guard: &mut Option<P::PartitionGuard<'s>>,
     ) -> HsmResult<UnoReply<'s>> {
+        // Every MBOR command gets a log, bound before anything is received
+        // or mutated. Unlike TBOR, MBOR never grows its request allocation,
+        // so the log need not wait for the opcode.
+        let undo = undo.insert(self.bind_undo(io)?);
         let req = self.pal().recv_request(io).await?;
         let req_len = req.len;
         let req_buf = &mut req.buf.into_buffer()[..req_len];
