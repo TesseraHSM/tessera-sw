@@ -89,12 +89,12 @@ pub const TEST_POTA_ECC_PUB_KEY: [u8; 120] = [
 pub type DdiTest = TsraDdi;
 
 /// Cross-process lock held for one complete hardware-test lifecycle.
-struct HardwareTestLock {
+pub struct HardwareTestLock {
     file: fs::File,
 }
 
 impl HardwareTestLock {
-    fn acquire() -> Self {
+    pub fn acquire() -> Self {
         let path = std::env::temp_dir().join("tsra-ddi-mbor-test-hooks.lock");
         let file = fs::OpenOptions::new()
             .read(true)

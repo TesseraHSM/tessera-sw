@@ -40,6 +40,8 @@ fn disable_zeroizes_psks_and_default_baking_restores_bootstrap() {
     let p = Partition(14);
     p.reset();
     p.bake_default_psks();
+    let guid = [0x4Du8; GUID_LEN];
+    p.set_vm_launch_guid(&guid);
 
     for round in 0..2u8 {
         let psk_co = [0xA1 + round; PSK_LEN];
@@ -52,6 +54,13 @@ fn disable_zeroizes_psks_and_default_baking_restores_bootstrap() {
         p.clear_state(PartResetKind::Disable);
         assert_eq!(&p.psk_co()[..], &[0u8; PSK_LEN]);
         assert_eq!(&p.psk_cu()[..], &[0u8; PSK_LEN]);
+        // As in the reference `disable()`, the VM launch GUID is kept; only a
+        // free clears it.
+        assert_eq!(
+            &p.vm_launch_guid()[..],
+            &guid,
+            "Disable must keep the VM launch GUID"
+        );
 
         p.bake_default_psks();
         assert_eq!(&p.psk_co()[..], &DEFAULT_PSK_CO);
@@ -215,8 +224,9 @@ fn preserves_provisioning_and_clears_tenant_state() {
     );
 }
 
-/// `clear_identity` must zero the 16-byte id, drop the identity key handle
-/// (dropping `partition_id_valid` with it), and zero reserved identity bytes.
+/// `clear_identity` must zero the 16-byte id and private key, clear
+/// `partition_id_valid`, drop the identity key handle, and zero reserved
+/// identity bytes.
 ///
 /// The NSSR migrate path relies on this to erase the stale `id_key_id` before
 /// re-provisioning a fresh identity, so this guards that the identity fields
@@ -226,10 +236,13 @@ fn clear_identity_zeros_id_handle_and_reserved_bytes() {
     let pid = 9usize;
 
     let id = [0x5Au8; ID_LEN];
+    let priv_key = [0x3Cu8; ID_PRIV_LEN];
 
     {
         let mut p = Partition(pid);
         p.set_id(buf(&id)).unwrap();
+        p.set_id_priv_key(buf(&priv_key)).unwrap();
+        p.set_id_valid(true);
         p.set_id_key_id(Some(HsmKeyId::from(0x1234u16)));
         p.slot_mut()
             .partition_identifier
@@ -241,7 +254,13 @@ fn clear_identity_zeros_id_handle_and_reserved_bytes() {
     {
         let p = Partition(pid);
         assert!(p.id_key_id().is_some(), "id key handle must be seeded");
+        assert!(p.id_valid(), "identity must be marked valid");
         assert_eq!(&p.id()[..], &id[..], "id must be seeded");
+        assert_eq!(
+            &p.id_priv_key()[..],
+            &priv_key[..],
+            "private key must be seeded"
+        );
     }
 
     // Act.
@@ -249,11 +268,51 @@ fn clear_identity_zeros_id_handle_and_reserved_bytes() {
 
     let p = Partition(pid);
     assert!(p.id_key_id().is_none(), "id key handle must be cleared");
+    assert!(!p.id_valid(), "identity valid flag must be cleared");
     assert_eq!(&p.id()[..], &[0u8; ID_LEN][..], "id must be zeroed");
+    assert_eq!(
+        &p.id_priv_key()[..],
+        &[0u8; ID_PRIV_LEN][..],
+        "private key must be zeroed"
+    );
     assert_eq!(
         &p.slot().partition_identifier.reserved_pub_key[..],
         &[0u8; ID_PUB_LEN][..],
         "reserved identity bytes must be zeroed"
+    );
+}
+
+/// Dropping only the identity key handle (Disable) must keep the stored
+/// identity so the next Enable can re-import the same key.
+#[test]
+fn dropping_id_key_handle_keeps_stored_identity() {
+    let pid = 16usize;
+    let id = [0x6Bu8; ID_LEN];
+    let priv_key = [0x2Du8; ID_PRIV_LEN];
+
+    {
+        let mut p = Partition(pid);
+        p.set_id(buf(&id)).unwrap();
+        p.set_id_priv_key(buf(&priv_key)).unwrap();
+        p.set_id_valid(true);
+        p.set_id_key_id(Some(HsmKeyId::from(0x0102u16)));
+    }
+
+    Partition(pid).set_id_key_id(None);
+
+    let p = Partition(pid);
+    assert!(p.id_key_id().is_none(), "id key handle must be cleared");
+    assert!(p.id_valid(), "stored identity must stay valid");
+    assert_eq!(&p.id()[..], &id[..], "id must be kept");
+    assert_eq!(
+        &p.id_priv_key()[..],
+        &priv_key[..],
+        "private key must be kept"
+    );
+    assert_eq!(
+        p.set_id_priv_key(buf(&[0u8; ID_PRIV_LEN - 1])),
+        Err(HsmError::InvalidArg),
+        "short private key must be rejected"
     );
 }
 

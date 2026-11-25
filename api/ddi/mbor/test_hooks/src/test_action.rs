@@ -164,7 +164,7 @@ impl TryFrom<TestActionRequest> for DdiTestActionReq {
 
 /// Execute a typed TestAction request against validation firmware.
 pub fn helper_test_action_cmd(
-    dev: &mut <tsra_ddi::TsraDdi as tsra_ddi::Ddi>::Dev,
+    dev: &<tsra_ddi::TsraDdi as tsra_ddi::Ddi>::Dev,
     session_id: u16,
     request: TestActionRequest,
 ) -> tsra_ddi::DdiResult<DdiTestActionCmdResp> {

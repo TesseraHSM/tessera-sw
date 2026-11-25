@@ -1679,7 +1679,10 @@ impl HsmPal for UnoHsmPal {
                 // The SP decides impactless vs impactful updates; an impactful
                 // update resets the SoC (POR path above). Here the store is
                 // preserved as-is; only Gate 1 and the session transport
-                // epochs are advanced.
+                // epochs are advanced. A warm reset that
+                // completes an update from another firmware family finds a
+                // store the SP rebuilt in this layout from the Admin resource
+                // table, so it takes the same path.
                 info!(
                     "boot",
                     "init: reset=warm/fwupdate -> keep store, rearm gate1"

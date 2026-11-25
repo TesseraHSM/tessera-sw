@@ -308,8 +308,9 @@ pub struct PinPolicy {
 
 // ── On-storage sub-structs (crate-private; mirror reference layout) ───────
 
-/// Partition identity: random id, identity private key (reserved/unused on
-/// Uno — the private key lives in the vault), and reserved public-key space.
+/// Partition identity: random id, identity private key (the persistent copy;
+/// the vault holds a re-importable working copy), and reserved public-key
+/// space.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct PartitionIdentifier {
@@ -656,15 +657,16 @@ impl Partition {
         slot.unwrapping_key_id = absent;
     }
 
-    /// Zeroes the provisioned identity and drops its key handle.
+    /// Zeroes the provisioned identity (id and private key), clears its
+    /// valid flag, and drops its key handle.
     #[inline(never)]
     pub fn clear_identity(mut self) {
         self.id_mut().fill(0);
         self.set_id_key_id(None);
-        self.slot_mut()
-            .partition_identifier
-            .reserved_pub_key
-            .fill(0);
+        let slot = self.slot_mut();
+        slot.partition_identifier.priv_key.fill(0);
+        slot.partition_identifier.reserved_pub_key.fill(0);
+        slot.partition_id_valid = false;
     }
 
     /// Zeroes the enable-time keys: the establish-credential and
@@ -688,16 +690,17 @@ impl Partition {
     /// policy hash and PTA public key, so the partition is provisioned
     /// (`PartInit` / `PartFinal`) afresh after either kind.
     ///
-    /// [`PartResetKind::Disable`] additionally wipes the migrated state
-    /// (sealed BK3 + incarnation flag and the VM launch GUID) and the PSKs;
-    /// [`PartResetKind::Migrate`] keeps the migrated state and returns the
-    /// PSKs to their defaults, so a host that resets via NSSR re-establishes
-    /// its credential, rotates its PSKs and provisions the partition again.
-    /// This helper leaves the partition identity, `Masked_BK_BOOT`, persistent
-    /// session table, resource mask, generation counter, lifecycle state, and
-    /// the SP-published unwrapping-key slot (Gate 1 + backup, wiped only when
-    /// the partition is freed so a re-enabled partition re-imports the same
-    /// key) for the caller to manage. The PAL keeps established session
+    /// [`PartResetKind::Disable`] additionally wipes the migrated sealed BK3
+    /// (+ incarnation flag) and the PSKs; [`PartResetKind::Migrate`] keeps it
+    /// and returns the PSKs to their defaults, so a host that resets via NSSR
+    /// re-establishes its credential, rotates its PSKs and provisions the
+    /// partition again. This helper leaves the partition identity, the VM
+    /// launch GUID (cleared only when the partition is freed, as in the
+    /// reference `reset()`), `Masked_BK_BOOT`, persistent session table,
+    /// resource mask, generation counter, lifecycle state, and the
+    /// SP-published unwrapping-key slot (Gate 1 + backup, wiped only when the
+    /// partition is freed so a re-enabled partition re-imports the same key)
+    /// for the caller to manage. The PAL keeps established session
     /// reservations on disable and NSSR/migrate, and releases all slots on
     /// free.
     #[inline(never)]
@@ -766,7 +769,6 @@ impl Partition {
                 let slot = self.slot_mut();
                 slot.psk_co = [0u8; PSK_LEN];
                 slot.psk_cu = [0u8; PSK_LEN];
-                slot.vm_launch_guid = [0u8; GUID_LEN];
             }
         }
     }
@@ -846,10 +848,37 @@ impl Partition {
         Ok(())
     }
 
-    /// Whether the partition identity has been provisioned.
+    /// Whether the partition identity (id and private key) is stored. Set
+    /// at allocation and kept across Disable/Enable and warm reset; cleared
+    /// only by [`clear_identity`](Self::clear_identity).
     #[inline(never)]
     pub fn id_valid(self) -> bool {
         self.slot().partition_id_valid
+    }
+
+    /// Borrows the stored 48-byte identity private key.
+    #[inline(never)]
+    pub fn id_priv_key(self) -> &'static HsmDmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { HsmDmaBuf::from_raw(&self.slot().partition_identifier.priv_key) }
+    }
+
+    /// Stores the 48-byte identity private key.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `ID_PRIV_LEN` bytes.
+    #[inline(never)]
+    pub fn set_id_priv_key(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != ID_PRIV_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        self.slot_mut()
+            .partition_identifier
+            .priv_key
+            .copy_from_slice(src);
+        Ok(())
     }
 
     /// Sets the partition-identity-valid flag.
@@ -1211,17 +1240,13 @@ impl Partition {
         )
     }
 
-    /// Sets (or clears, with `None`) the identity key handle.
-    ///
-    /// Keeps `partition_id_valid` in sync with handle presence: the PAL
-    /// gates identity-property access on `id_key_id().is_some()`, so the
-    /// stored validity flag tracks the same "identity provisioned" state
-    /// (set on provisioning, cleared on `clear_identity` / free).
+    /// Sets (or clears, with `None`) the identity key handle: the vault
+    /// working copy of the stored identity key. Clearing it leaves the stored
+    /// identity and [`id_valid`](Self::id_valid) intact, so the key can be
+    /// re-imported.
     #[inline(never)]
     pub fn set_id_key_id(mut self, key: Option<HsmKeyId>) {
-        let slot = self.slot_mut();
-        slot.id_key_id = write_handle(key);
-        slot.partition_id_valid = key.is_some();
+        self.slot_mut().id_key_id = write_handle(key);
     }
 
     /// Reads the establish-credential key handle.
