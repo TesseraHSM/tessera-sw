@@ -22,7 +22,9 @@
 class PrivateSimulator
 {
   public:
-    PrivateSimulator()
+    /// Start the server. `api_rev` (MAJOR_MINOR, e.g. "2_0") picks the device
+    /// generation it serves; empty keeps the server's default.
+    explicit PrivateSimulator(const std::string &api_rev = "")
     {
         std::string exe = server_bin();
         if (exe.empty())
@@ -35,15 +37,24 @@ class PrivateSimulator
             return;
         }
         std::string path(exe);
+        std::string flag("--api-rev");
+        std::string rev(api_rev);
         std::string address("tcp://127.0.0.1:0");
-        char *argv[] = { path.data(), address.data(), nullptr };
+        std::vector<char *> argv = { path.data() };
+        if (!rev.empty())
+        {
+            argv.push_back(flag.data());
+            argv.push_back(rev.data());
+        }
+        argv.push_back(address.data());
+        argv.push_back(nullptr);
         pid_ = fork();
         if (pid_ == 0)
         {
             dup2(fds[1], STDOUT_FILENO);
             close(fds[0]);
             close(fds[1]);
-            execv(path.c_str(), argv);
+            execv(path.c_str(), argv.data());
             _exit(127);
         }
         close(fds[1]);

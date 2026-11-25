@@ -99,6 +99,10 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slotID, CK_TOKEN_INFO_PTR pInfo)
     {
         return CKR_TOKEN_NOT_PRESENT;
     }
+    if (!slot->token_recognized)
+    {
+        return CKR_TOKEN_NOT_RECOGNIZED;
+    }
     memset(pInfo, 0, sizeof(*pInfo));
 
     tsra_pkcs11_pad_str(pInfo->label, sizeof(pInfo->label), slot->label);
@@ -178,6 +182,10 @@ CK_RV C_GetMechanismList(
     {
         return CKR_SLOT_ID_INVALID;
     }
+    if (!g_tsra_pkcs11.slots[slotID].token_recognized)
+    {
+        return CKR_TOKEN_NOT_RECOGNIZED;
+    }
     CK_ULONG n = TSRA_PKCS11_MECH_COUNT;
     if (pMechanismList == NULL_PTR)
     {
@@ -210,6 +218,10 @@ CK_RV C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_MECHANISM
     if (slotID >= g_tsra_pkcs11.slot_count)
     {
         return CKR_SLOT_ID_INVALID;
+    }
+    if (!g_tsra_pkcs11.slots[slotID].token_recognized)
+    {
+        return CKR_TOKEN_NOT_RECOGNIZED;
     }
     const tsra_pkcs11_mech_t *m = tsra_pkcs11_mech_find(type);
     if (m == NULL)

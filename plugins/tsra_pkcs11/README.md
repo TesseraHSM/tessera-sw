@@ -461,6 +461,13 @@ This is the agreed user-role and PIN behaviour. The module logs in with the
 device's V1 session, whose credential is a 16-byte partition ID plus a
 16-byte PIN, so the token has exactly one user.
 
+It opens the partition at device API revision 1.0, as the OpenSSL provider
+and engine do. A device that serves only revision 2.x takes no V1 session:
+its slot is listed, but `C_GetTokenInfo`, `C_OpenSession`,
+`C_GetMechanismList` and `C_GetMechanismInfo` return
+`CKR_TOKEN_NOT_RECOGNIZED`, and the debug trace (`TSRA_PKCS11_DEBUG=1`)
+names the revisions the device serves.
+
 - `C_Login` as `CKU_USER` is the only login; `C_LoginUser` is the same call
   and ignores the username. `CKU_SO` returns `CKR_USER_TYPE_INVALID`.
   `C_InitToken`, `C_InitPIN` and `C_SetPIN` return

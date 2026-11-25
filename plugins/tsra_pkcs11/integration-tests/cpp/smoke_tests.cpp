@@ -10,6 +10,7 @@
 /// already throws before any of these.
 
 #include <gtest/gtest.h>
+#include <string>
 #include <vector>
 
 #include "tsra_pkcs11_ec_template.h"
@@ -17,6 +18,8 @@
 #include "utils/aes_helpers.hpp"
 #include "utils/ec_helpers.hpp"
 #include "utils/module.hpp"
+#include "utils/sock_server.hpp"
+#include "utils/subprocess.hpp"
 #include "utils/unwrap_helpers.hpp"
 
 class smoke : public PublicSession
@@ -45,6 +48,60 @@ TEST_F(smoke, slot_zero_has_a_login_required_token)
     ASSERT_CKR_OK(p11()->C_GetTokenInfo(kSlot, &tinfo));
     EXPECT_NE(0u, tinfo.flags & CKF_LOGIN_REQUIRED)
         << "every key-backed call needs the device session behind C_Login";
+}
+
+TEST(api_revision, a_partition_without_revision_1_0_is_not_recognized)
+{
+    if (PrivateSimulator::server_bin().empty())
+    {
+        GTEST_SKIP() << "needs simulators of its own: set server_bin in TSRA_TEST_ARGS";
+    }
+    struct
+    {
+        const char *api_rev; /* the server's --api-rev, empty for its default */
+        CK_RV want;
+        const char *what;
+    } rows[] = {
+        { "", CKR_OK, "a device serving 1.0 and 1.1 is the token" },
+        { "2_0", CKR_TOKEN_NOT_RECOGNIZED, "a device serving only 2.0 takes only V2 sessions" },
+    };
+    for (const auto &row : rows)
+    {
+        PrivateSimulator sim(row.api_rev);
+        ASSERT_TRUE(sim.ok()) << "could not start " << PrivateSimulator::server_bin();
+        SubprocessModule::Result child =
+            SubprocessModule::run("api_revision_child.reports_the_token", sim.env());
+        ASSERT_EQ(0, child.exit_code) << row.what;
+        ASSERT_EQ("1", child.values["ran"]) << row.what;
+        EXPECT_EQ(std::to_string(CKR_OK), child.values["slot_info"]) << "the slot stays listed";
+        for (const char *call :
+             { "token_info", "open_session", "mechanism_list", "mechanism_info" })
+        {
+            EXPECT_EQ(std::to_string(row.want), child.values[call]) << call << ": " << row.what;
+        }
+    }
+}
+
+TEST(api_revision_child, reports_the_token)
+{
+    SUBPROCESS_ONLY();
+    CK_SLOT_INFO slot{};
+    SubprocessModule::report("slot_info", std::to_string(p11()->C_GetSlotInfo(kSlot, &slot)));
+    CK_TOKEN_INFO token{};
+    SubprocessModule::report("token_info", std::to_string(p11()->C_GetTokenInfo(kSlot, &token)));
+    CK_SESSION_HANDLE s = 0;
+    CK_RV rv = p11()->C_OpenSession(kSlot, CKF_SERIAL_SESSION, nullptr, nullptr, &s);
+    SubprocessModule::report("open_session", std::to_string(rv));
+    if (rv == CKR_OK)
+    {
+        EXPECT_CKR_OK(p11()->C_CloseSession(s));
+    }
+    CK_ULONG count = 0;
+    rv = p11()->C_GetMechanismList(kSlot, nullptr, &count);
+    SubprocessModule::report("mechanism_list", std::to_string(rv));
+    CK_MECHANISM_INFO mech{};
+    rv = p11()->C_GetMechanismInfo(kSlot, CKM_SHA256, &mech);
+    SubprocessModule::report("mechanism_info", std::to_string(rv));
 }
 
 TEST_F(smoke, aes_mechanisms_are_advertised)

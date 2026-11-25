@@ -109,6 +109,7 @@ typedef struct
 {
     bool present;           /* an TSRA partition exists for this slot */
     bool token_initialized; /* CKF_TOKEN_INITIALIZED */
+    bool token_recognized;  /* the partition serves the module's API revision */
     char device_path[512];  /* TSRA partition OS path (from part_get_info) */
     char label[64];
     char serial[24];

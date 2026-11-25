@@ -37,6 +37,25 @@
 #define TSRA_BUFFER_TOO_SMALL (-4)
 #define TSRA_INTERNAL_ERROR (-5)
 
+/* The device API revision the module opens partitions at, as the OpenSSL
+ * provider and engine do. Its sessions are V1 sessions, which a device that
+ * serves only revision 2.x refuses. */
+static const struct tsra_api_rev k_api_rev = { 1, 0 };
+
+/* Negative, zero or positive as revision `a` is below, at or above `b`. */
+static int api_rev_cmp(struct tsra_api_rev a, struct tsra_api_rev b)
+{
+    if (a.major != b.major)
+    {
+        return (a.major < b.major) ? -1 : 1;
+    }
+    if (a.minor != b.minor)
+    {
+        return (a.minor < b.minor) ? -1 : 1;
+    }
+    return 0;
+}
+
 int32_t tsra_pkcs11_hsm_enumerate_slots(void)
 {
     tsra_handle list = 0;
@@ -96,6 +115,21 @@ int32_t tsra_pkcs11_hsm_enumerate_slots(void)
         snprintf(slot->device_path, sizeof(slot->device_path), "%s", (const char *)buf);
         slot->api_rev_major = (uint16_t)info.api_rev_max.major;
         slot->api_rev_minor = (uint16_t)info.api_rev_max.minor;
+        slot->token_recognized = (api_rev_cmp(info.api_rev_min, k_api_rev) <= 0) &&
+                                 (api_rev_cmp(k_api_rev, info.api_rev_max) <= 0);
+        if (!slot->token_recognized)
+        {
+            TSRA_PKCS11_LOG(
+                "partition %u serves API revisions %u.%u to %u.%u; the module needs %u.%u",
+                i,
+                info.api_rev_min.major,
+                info.api_rev_min.minor,
+                info.api_rev_max.major,
+                info.api_rev_max.minor,
+                k_api_rev.major,
+                k_api_rev.minor
+            );
+        }
         snprintf(slot->label, sizeof(slot->label), "TSRA partition %u", i);
         snprintf(slot->serial, sizeof(slot->serial), "TSRA%06u", i);
         free(buf);
@@ -328,9 +362,8 @@ CK_RV tsra_pkcs11_hsm_login(CK_SLOT_ID slot, const CK_BYTE *pin, uint32_t *out_s
     {
         const char *path = sl->device_path;
         struct tsra_str spath = { (tsra_char *)path, (uint32_t)(strlen(path) + 1) };
-        struct tsra_api_rev rev = { sl->api_rev_major ? sl->api_rev_major : 1, sl->api_rev_minor };
         tsra_handle dev = 0;
-        tsra_status st = tsra_part_open(&spath, &dev, rev);
+        tsra_status st = tsra_part_open(&spath, &dev, k_api_rev);
         if (st != TSRA_OK)
         {
             TSRA_PKCS11_LOG("part_open failed: %d", (int)st);
@@ -434,6 +467,7 @@ int32_t tsra_pkcs11_hsm_enumerate_slots(void)
     tsra_pkcs11_slot_t *slot = &g_tsra_pkcs11.slots[0];
     slot->present = true;
     slot->token_initialized = true;
+    slot->token_recognized = true;
     snprintf(slot->device_path, sizeof(slot->device_path), "tsra-placeholder-0");
     snprintf(slot->label, sizeof(slot->label), "TSRA (no device)");
     snprintf(slot->serial, sizeof(slot->serial), "TSRA000000");

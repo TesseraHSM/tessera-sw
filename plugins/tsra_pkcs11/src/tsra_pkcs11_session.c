@@ -217,6 +217,10 @@ CK_RV C_OpenSession(
     {
         return CKR_SLOT_ID_INVALID;
     }
+    if (!g_tsra_pkcs11.slots[slotID].token_recognized)
+    {
+        return CKR_TOKEN_NOT_RECOGNIZED;
+    }
     if ((flags & CKF_SERIAL_SESSION) == 0)
     {
         return CKR_SESSION_PARALLEL_NOT_SUPPORTED;
