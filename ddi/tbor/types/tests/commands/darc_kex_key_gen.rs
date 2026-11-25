@@ -210,7 +210,7 @@ fn darc_kex_key_gen_rejects_both_scopes_on_default_psk() {
     let ctx = TestCtx::new();
 
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open default-PSK CO session");
 
     // Default-PSK restrictions must apply regardless of scope.
@@ -446,7 +446,7 @@ fn darc_kex_key_gen_cu_permission_gate_precedes_scope_validation() {
 fn darc_kex_key_gen_default_psk_gate_precedes_scope_validation() {
     let ctx = TestCtx::new();
     let session = ctx
-        .open_session(CO, SessionType::Authenticated)
+        .open_session(CO, SessionSuite::EcdhP384)
         .expect("open default-PSK CO session");
 
     for scope in [SCOPE_SESSION, SCOPE_SECURITY_DOMAIN] {

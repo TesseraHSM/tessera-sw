@@ -611,6 +611,8 @@ fn darc_tmk_import_rejects_invalid_cert_index() {
 
 /// The claimed DER certificate length must agree with the actual OOB
 /// certificate bytes.
+/// The claimed DER certificate length must agree with the actual OOB
+/// certificate bytes.
 #[test]
 fn darc_tmk_import_rejects_cert_length_mismatch() {
     let ready = sd_initialized_session();
@@ -626,7 +628,7 @@ fn darc_tmk_import_rejects_cert_length_mismatch() {
 
         assert!(
             ready.ctx.tbor_oob(&bad, &chain.der_items()).is_err(),
-            "certificate {cert_index} length mismatch must fail",
+            "certificate length mismatch must fail",
         );
     }
 }
@@ -660,6 +662,7 @@ fn darc_tmk_import_recovers_after_failed_import() {
 
 /// Verify that the import command accepts varied valid TMK values,
 /// not just a single repeated-byte fixture.
+/// Verify that the import command accepts varied valid TMK values.
 #[test]
 fn darc_tmk_import_accepts_multiple_tmk_patterns() {
     let ready = sd_initialized_session();
@@ -683,19 +686,22 @@ fn darc_tmk_import_accepts_multiple_tmk_patterns() {
         descending,
     ];
 
-    for (index, pattern) in patterns.iter().enumerate() {
+    for pattern in &patterns {
         let (req, chain) = build_valid_import(&ready, &ready.pota, pattern);
 
         let resp = ready
             .ctx
             .tbor_oob(&req, &chain.der_items())
-            .unwrap_or_else(|e| panic!("TMK pattern {index} import failed: {e:?}"));
+            .unwrap_or_else(|_| panic!("TMK pattern import failed"));
 
-        assert_eq!(resp.masked_tmk.len(), MASKED_TMK_LEN, "pattern {index}",);
+        assert!(
+            resp.masked_tmk.len() == MASKED_TMK_LEN,
+            "masked TMK length must match",
+        );
 
         assert!(
             resp.masked_tmk.iter().any(|&b| b != 0),
-            "pattern {index}: masked output must not be zero",
+            "masked output must not be zero",
         );
     }
 }

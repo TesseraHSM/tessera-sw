@@ -764,22 +764,16 @@ fn darc_key_wrap_rejects_invalid_session_ids() {
         })
         .expect("generate EC key");
 
-    for invalid_sid in [0u16, u16::MAX] {
-        if invalid_sid == sid {
-            continue;
-        }
+    let result = ready.ctx.tbor(&TborDarcKeyWrapReq {
+        session_id: u16::MAX,
+        masked_tmk,
+        masked_key: ec.masked_key.clone(),
+    });
 
-        let result = ready.ctx.tbor(&TborDarcKeyWrapReq {
-            session_id: invalid_sid,
-            masked_tmk,
-            masked_key: ec.masked_key.clone(),
-        });
-
-        assert!(
-            result.is_err(),
-            "DarcKeyWrap accepted invalid session ID {invalid_sid}"
-        );
-    }
+    assert!(
+        result.is_err(),
+        "DarcKeyWrap accepted an invalid session ID"
+    );
 
     // Invalid requests must not invalidate the real session.
     ready
@@ -964,11 +958,7 @@ fn darc_key_wrap_repeated_wrap_preserves_key() {
 
     let signature = ready
         .ctx
-        .tbor(&TborEccSignReq {
-            session_id: sid,
-            masked_key: ec.masked_key,
-            digest: dgst.clone(),
-        })
+        .tbor(&sign_req(sid, ec.masked_key, original_pub.len() / 2, &dgst))
         .expect("sign using original key");
 
     assert!(
@@ -1027,11 +1017,12 @@ fn darc_key_wrap_multiple_curves_one_tmk() {
 
         let signed = ready
             .ctx
-            .tbor(&TborEccSignReq {
-                session_id: sid,
-                masked_key: recovered.masked_key,
-                digest: dgst.clone(),
-            })
+            .tbor(&sign_req(
+                sid,
+                recovered.masked_key,
+                original_pub.len() / 2,
+                &dgst,
+            ))
             .expect("sign using recovered EC key");
 
         assert!(

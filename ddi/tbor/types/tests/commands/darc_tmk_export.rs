@@ -215,6 +215,7 @@ fn darc_tmk_export_yields_fresh_seal() {
     assert_ne!(first.sealed_tmk, second.sealed_tmk);
 }
 
+/// Rejects a sender KEX certificate chain in place of the PID authorization chain.
 #[test]
 fn darc_tmk_export_report_does_not_authenticate_a_sender_kex_identity() {
     let ready = sd_initialized_session_with_data();
@@ -243,6 +244,7 @@ fn darc_tmk_export_report_does_not_authenticate_a_sender_kex_identity() {
         .expect_fw_reject_oob(&import, &wrong_chain.der_items(), TborStatus::InvalidArg);
 }
 
+/// Rejects a policy whose hash differs from the initialized partition policy.
 #[test]
 fn darc_tmk_export_rejects_policy_hash_mismatch() {
     let ready = sd_initialized_session_with_data();
@@ -262,6 +264,7 @@ fn darc_tmk_export_rejects_policy_hash_mismatch() {
         .expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::InvalidArg);
 }
 
+/// Rejects a target certificate chain not anchored to the policy DATA CA.
 #[test]
 fn darc_tmk_export_rejects_unanchored_cert_chain() {
     let ready = sd_initialized_session_with_data();
@@ -328,6 +331,7 @@ fn darc_tmk_export_rejected_on_default_psk() {
     ctx.expect_fw_reject(&req, TborStatus::DefaultPskMustRotate);
 }
 
+/// Rejects malformed masked TMK wire layouts.
 #[test]
 fn darc_tmk_export_rejects_bad_masked_key_layout() {
     let ready = sd_initialized_session_with_data();
@@ -341,53 +345,14 @@ fn darc_tmk_export_rejects_bad_masked_key_layout() {
     assert_masked_key_layout_rejected(&ready.ctx, &req);
 }
 
-/// Rejects an authenticated sender-key blob with corrupted ciphertext.
-#[test]
-fn darc_tmk_export_rejects_corrupted_masked_sender_key() {
-    let ready = sd_initialized_session_with_data();
-    let masked_tmk = gen_masked_tmk(&ready);
-    let source = mint_kex(&ready);
-    let target = mint_kex(&ready);
-
-    let (mut req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        masked_tmk,
-    );
-    let der = chain.der_items();
-
-    // Modify authenticated ciphertext without changing its length.
-    req.masked_sender_key[MASKED_KEX_KEY_LEN / 2] ^= 0x80;
-    assert!(
-        ready.ctx.tbor_oob(&req, &der).is_err(),
-        "tampered masked sender key must not be accepted"
-    );
-
-    // A failed request must not prevent a subsequent valid export.
-    req.masked_sender_key = source.masked;
-    ready
-        .ctx
-        .tbor_oob(&req, &der)
-        .expect("valid export after sender-key rejection");
-}
-
 /// Rejects a tampered masked TMK without breaking subsequent exports.
 #[test]
 fn darc_tmk_export_rejects_corrupted_masked_tmk() {
     let ready = sd_initialized_session_with_data();
     let masked_tmk = gen_masked_tmk(&ready);
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
 
-    let (mut req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        masked_tmk,
-    );
+    let (mut req, chain) = build_valid_export(&ready, &ready.data, &target.pub_raw, masked_tmk);
     let der = chain.der_items();
 
     req.masked_tmk[MASKED_TMK_LEN / 2] ^= 0x80;
@@ -403,30 +368,16 @@ fn darc_tmk_export_rejects_corrupted_masked_tmk() {
         .expect("valid export after TMK rejection");
 }
 
-/// Rejects zero-filled masked sender keys and TMKs.
+/// Rejects a zero-filled masked TMK and accepts the restored valid TMK.
 #[test]
 fn darc_tmk_export_rejects_zeroed_masked_inputs() {
     let ready = sd_initialized_session_with_data();
     let masked_tmk = gen_masked_tmk(&ready);
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
 
-    let (mut req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        masked_tmk,
-    );
+    let (mut req, chain) = build_valid_export(&ready, &ready.data, &target.pub_raw, masked_tmk);
     let der = chain.der_items();
 
-    req.masked_sender_key = [0u8; MASKED_KEX_KEY_LEN];
-    assert!(
-        ready.ctx.tbor_oob(&req, &der).is_err(),
-        "all-zero masked sender key must fail"
-    );
-
-    req.masked_sender_key = source.masked;
     req.masked_tmk = [0u8; MASKED_TMK_LEN];
     assert!(
         ready.ctx.tbor_oob(&req, &der).is_err(),
@@ -437,7 +388,7 @@ fn darc_tmk_export_rejects_zeroed_masked_inputs() {
     ready
         .ctx
         .tbor_oob(&req, &der)
-        .expect("valid export after zero-input rejections");
+        .expect("valid export after zeroed TMK rejection");
 }
 
 /// Rejects a certificate descriptor referring to an absent OOB item.
@@ -445,16 +396,9 @@ fn darc_tmk_export_rejects_zeroed_masked_inputs() {
 fn darc_tmk_export_rejects_out_of_range_cert_index() {
     let ready = sd_initialized_session_with_data();
     let masked_tmk = gen_masked_tmk(&ready);
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
 
-    let (mut req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        masked_tmk,
-    );
+    let (mut req, chain) = build_valid_export(&ready, &ready.data, &target.pub_raw, masked_tmk);
     let der = chain.der_items();
 
     // Only two OOB certificates are supplied: indices 0 and 1.
@@ -470,16 +414,9 @@ fn darc_tmk_export_rejects_out_of_range_cert_index() {
 fn darc_tmk_export_rejects_incorrect_cert_length() {
     let ready = sd_initialized_session_with_data();
     let masked_tmk = gen_masked_tmk(&ready);
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
 
-    let (mut req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        masked_tmk,
-    );
+    let (mut req, chain) = build_valid_export(&ready, &ready.data, &target.pub_raw, masked_tmk);
     let der = chain.der_items();
 
     // The actual DER bytes are unchanged, but their advertised size is wrong.
@@ -495,16 +432,9 @@ fn darc_tmk_export_rejects_incorrect_cert_length() {
 fn darc_tmk_export_rejects_incomplete_target_cert_chain() {
     let ready = sd_initialized_session_with_data();
     let masked_tmk = gen_masked_tmk(&ready);
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
 
-    let (mut req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        masked_tmk,
-    );
+    let (mut req, chain) = build_valid_export(&ready, &ready.data, &target.pub_raw, masked_tmk);
     let der = chain.der_items();
 
     // The request now describes only one of the two provided certificates.
@@ -520,24 +450,11 @@ fn darc_tmk_export_rejects_incomplete_target_cert_chain() {
 fn darc_tmk_export_multiple_targets_roundtrip() {
     let ready = sd_initialized_session_with_data();
     let masked_tmk = gen_masked_tmk(&ready);
-    let source = mint_kex(&ready);
     let target_a = mint_kex(&ready);
     let target_b = mint_kex(&ready);
 
-    let (req_a, chain_a) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target_a.pub_raw,
-        source.masked,
-        masked_tmk,
-    );
-    let (req_b, chain_b) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target_b.pub_raw,
-        source.masked,
-        masked_tmk,
-    );
+    let (req_a, chain_a) = build_valid_export(&ready, &ready.data, &target_a.pub_raw, masked_tmk);
+    let (req_b, chain_b) = build_valid_export(&ready, &ready.data, &target_b.pub_raw, masked_tmk);
 
     let exported_a = ready
         .ctx
@@ -553,18 +470,8 @@ fn darc_tmk_export_multiple_targets_roundtrip() {
         "separate target exports must not produce identical envelopes"
     );
 
-    let imported_a = reimport(
-        &ready,
-        target_a.masked,
-        &source.pub_raw,
-        exported_a.sealed_tmk,
-    );
-    let imported_b = reimport(
-        &ready,
-        target_b.masked,
-        &source.pub_raw,
-        exported_b.sealed_tmk,
-    );
+    let imported_a = reimport(&ready, target_a.masked, exported_a.sealed_tmk);
+    let imported_b = reimport(&ready, target_b.masked, exported_b.sealed_tmk);
 
     assert_eq!(imported_a.len(), MASKED_TMK_LEN);
     assert_eq!(imported_b.len(), MASKED_TMK_LEN);
@@ -576,15 +483,9 @@ fn darc_tmk_export_multiple_targets_roundtrip() {
 #[test]
 fn darc_tmk_export_rejects_duplicate_cert_descriptors() {
     let ready = sd_initialized_session_with_data();
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
-    let (mut req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        gen_masked_tmk(&ready),
-    );
+    let (mut req, chain) =
+        build_valid_export(&ready, &ready.data, &target.pub_raw, gen_masked_tmk(&ready));
     let der = chain.der_items();
 
     // Both descriptors now point at the same OOB certificate.
@@ -599,15 +500,9 @@ fn darc_tmk_export_rejects_duplicate_cert_descriptors() {
 #[test]
 fn darc_tmk_export_rejects_swapped_cert_descriptors() {
     let ready = sd_initialized_session_with_data();
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
-    let (mut req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        gen_masked_tmk(&ready),
-    );
+    let (mut req, chain) =
+        build_valid_export(&ready, &ready.data, &target.pub_raw, gen_masked_tmk(&ready));
     let der = chain.der_items();
 
     // Preserve OOB bytes but reverse the logical certificate-chain order.
@@ -622,15 +517,9 @@ fn darc_tmk_export_rejects_swapped_cert_descriptors() {
 #[test]
 fn darc_tmk_export_rejects_empty_target_cert_chain() {
     let ready = sd_initialized_session_with_data();
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
-    let (mut req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        gen_masked_tmk(&ready),
-    );
+    let (mut req, chain) =
+        build_valid_export(&ready, &ready.data, &target.pub_raw, gen_masked_tmk(&ready));
 
     req.target_cert_chain.clear();
     assert!(
@@ -643,15 +532,9 @@ fn darc_tmk_export_rejects_empty_target_cert_chain() {
 #[test]
 fn darc_tmk_export_rejects_tampered_target_der() {
     let ready = sd_initialized_session_with_data();
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
-    let (req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        gen_masked_tmk(&ready),
-    );
+    let (req, chain) =
+        build_valid_export(&ready, &ready.data, &target.pub_raw, gen_masked_tmk(&ready));
     let mut der = chain.der_items();
 
     // Keep the declared length unchanged but corrupt the DER encoding itself.
@@ -668,15 +551,12 @@ fn darc_tmk_export_rejects_tampered_target_der() {
 #[test]
 fn darc_tmk_export_distinct_tmks_roundtrip_to_same_target() {
     let ready = sd_initialized_session_with_data();
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
     let tmk_a = gen_masked_tmk(&ready);
     let tmk_b = gen_masked_tmk(&ready);
 
-    let (req_a, chain_a) =
-        build_valid_export(&ready, &ready.data, &target.pub_raw, source.masked, tmk_a);
-    let (req_b, chain_b) =
-        build_valid_export(&ready, &ready.data, &target.pub_raw, source.masked, tmk_b);
+    let (req_a, chain_a) = build_valid_export(&ready, &ready.data, &target.pub_raw, tmk_a);
+    let (req_b, chain_b) = build_valid_export(&ready, &ready.data, &target.pub_raw, tmk_b);
     let sealed_a = ready
         .ctx
         .tbor_oob(&req_a, &chain_a.der_items())
@@ -689,8 +569,8 @@ fn darc_tmk_export_distinct_tmks_roundtrip_to_same_target() {
         .sealed_tmk;
     assert_ne!(sealed_a, sealed_b);
 
-    let imported_a = reimport(&ready, target.masked, &source.pub_raw, sealed_a);
-    let imported_b = reimport(&ready, target.masked, &source.pub_raw, sealed_b);
+    let imported_a = reimport(&ready, target.masked, sealed_a);
+    let imported_b = reimport(&ready, target.masked, sealed_b);
     assert_eq!(imported_a.len(), MASKED_TMK_LEN);
     assert_eq!(imported_b.len(), MASKED_TMK_LEN);
     assert!(imported_a.iter().any(|&b| b != 0));
@@ -702,14 +582,12 @@ fn darc_tmk_export_distinct_tmks_roundtrip_to_same_target() {
 #[test]
 fn darc_tmk_export_sealed_tmk_is_bound_to_target_receiver() {
     let ready = sd_initialized_session_with_data();
-    let source = mint_kex(&ready);
     let target_a = mint_kex(&ready);
     let target_b = mint_kex(&ready);
     let (req, chain) = build_valid_export(
         &ready,
         &ready.data,
         &target_a.pub_raw,
-        source.masked,
         gen_masked_tmk(&ready),
     );
     let sealed = ready
@@ -720,18 +598,8 @@ fn darc_tmk_export_sealed_tmk_is_bound_to_target_receiver() {
 
     // The import-side sender chain must be valid, so only the receiver
     // private key differs from the positive round-trip case.
-    let sender_chain = make_chain(&ready.pota, &source.pub_raw);
-    let sender_der = sender_chain.der_items();
-    let sender_descriptors = vec![
-        CertDescriptor {
-            index: 0,
-            length: (sender_der[0].len() as u16).into(),
-        },
-        CertDescriptor {
-            index: 1,
-            length: (sender_der[1].len() as u16).into(),
-        },
-    ];
+    let sender_der: Vec<&[u8]> = ready.pid_chain.iter().map(Vec::as_slice).collect();
+    let sender_descriptors = descriptors(&sender_der);
     let import_req = TborDarcTmkImportReq {
         session_id: ready.session.session_id,
         masked_kex_key: target_b.masked,
@@ -744,7 +612,7 @@ fn darc_tmk_export_sealed_tmk_is_bound_to_target_receiver() {
         "target B must not be able to decrypt an envelope sealed for A"
     );
     // Also prove the same envelope is valid for the intended recipient.
-    let imported = reimport(&ready, target_a.masked, &source.pub_raw, sealed);
+    let imported = reimport(&ready, target_a.masked, sealed);
     assert_eq!(imported.len(), MASKED_TMK_LEN);
 }
 
@@ -752,15 +620,9 @@ fn darc_tmk_export_sealed_tmk_is_bound_to_target_receiver() {
 #[test]
 fn darc_tmk_export_rejects_max_session_id_and_recovers() {
     let ready = sd_initialized_session_with_data();
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
-    let (mut req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        gen_masked_tmk(&ready),
-    );
+    let (mut req, chain) =
+        build_valid_export(&ready, &ready.data, &target.pub_raw, gen_masked_tmk(&ready));
     let der = chain.der_items();
     let session_id = req.session_id;
 
@@ -781,15 +643,9 @@ fn darc_tmk_export_rejects_max_session_id_and_recovers() {
 #[test]
 fn darc_tmk_export_rejects_missing_oob_certificates() {
     let ready = sd_initialized_session_with_data();
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
-    let (req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        gen_masked_tmk(&ready),
-    );
+    let (req, chain) =
+        build_valid_export(&ready, &ready.data, &target.pub_raw, gen_masked_tmk(&ready));
 
     let empty: [&[u8]; 0] = [];
     assert!(
@@ -806,15 +662,9 @@ fn darc_tmk_export_rejects_missing_oob_certificates() {
 #[test]
 fn darc_tmk_export_rejects_tampered_second_target_der() {
     let ready = sd_initialized_session_with_data();
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
-    let (req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        gen_masked_tmk(&ready),
-    );
+    let (req, chain) =
+        build_valid_export(&ready, &ready.data, &target.pub_raw, gen_masked_tmk(&ready));
     let original = chain.der_items();
     let mut tampered = original;
     let mut second = original[1].to_vec();
@@ -835,15 +685,9 @@ fn darc_tmk_export_rejects_tampered_second_target_der() {
 #[test]
 fn darc_tmk_export_rejects_second_cert_length_mismatch() {
     let ready = sd_initialized_session_with_data();
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
-    let (mut req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        gen_masked_tmk(&ready),
-    );
+    let (mut req, chain) =
+        build_valid_export(&ready, &ready.data, &target.pub_raw, gen_masked_tmk(&ready));
     let der = chain.der_items();
     let original = req.target_cert_chain[1].length;
     req.target_cert_chain[1].length = 1u16.into();
@@ -859,50 +703,13 @@ fn darc_tmk_export_rejects_second_cert_length_mismatch() {
         .expect("valid export after restoring length");
 }
 
-/// Detects tampering at both ends of the authenticated masked sender key.
-#[test]
-fn darc_tmk_export_rejects_sender_key_boundary_tampering() {
-    let ready = sd_initialized_session_with_data();
-    let source = mint_kex(&ready);
-    let target = mint_kex(&ready);
-    let (mut req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        gen_masked_tmk(&ready),
-    );
-    let der = chain.der_items();
-    let original = req.masked_sender_key;
-
-    for offset in [0, MASKED_KEX_KEY_LEN - 1] {
-        req.masked_sender_key = original;
-        req.masked_sender_key[offset] ^= 0x01;
-        assert!(
-            ready.ctx.tbor_oob(&req, &der).is_err(),
-            "sender key tampering at offset {offset} must fail"
-        );
-    }
-    req.masked_sender_key = original;
-    ready
-        .ctx
-        .tbor_oob(&req, &der)
-        .expect("valid export after boundary tampering");
-}
-
 /// Detects tampering at both ends of the authenticated masked TMK.
 #[test]
 fn darc_tmk_export_rejects_tmk_boundary_tampering() {
     let ready = sd_initialized_session_with_data();
-    let source = mint_kex(&ready);
     let target = mint_kex(&ready);
-    let (mut req, chain) = build_valid_export(
-        &ready,
-        &ready.data,
-        &target.pub_raw,
-        source.masked,
-        gen_masked_tmk(&ready),
-    );
+    let (mut req, chain) =
+        build_valid_export(&ready, &ready.data, &target.pub_raw, gen_masked_tmk(&ready));
     let der = chain.der_items();
     let original = req.masked_tmk;
 
@@ -911,7 +718,7 @@ fn darc_tmk_export_rejects_tmk_boundary_tampering() {
         req.masked_tmk[offset] ^= 0x01;
         assert!(
             ready.ctx.tbor_oob(&req, &der).is_err(),
-            "masked TMK tampering at offset {offset} must fail"
+            "masked TMK boundary tampering must fail"
         );
     }
     req.masked_tmk = original;
