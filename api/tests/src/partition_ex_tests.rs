@@ -51,14 +51,26 @@ fn part_owner_mldsa_certificate_can_be_fetched() {
     }
     let _guard = PARTITION_LOCK.lock();
     let (part, rev) = new_partition();
+    if !host_pqc_available(tsra_crypto::MlDsaPrivateKey::from_seed(
+        tsra_crypto::MlDsaVariant::MlDsa87,
+        &[7; 32],
+    )) || !backend_mldsa_available(&part)
+    {
+        return;
+    }
     let session = open_rotated_co_session(&part, rev);
     let pota = AnyPotaFixture::new(AnchorKey::mldsa87(&[7; 32]));
     let policy = TestPolicy::new(pota.spki_thumbprint(), [0; POLICY_THUMBPRINT_LEN])
         .with_pta_alg(POLICY_PTA_ALG_MLDSA87)
         .encode();
-    let init = session
-        .part_init_ex(&policy, &valid_mach_seed())
-        .expect("ML-DSA PartInit");
+    let init = match session.part_init_ex(&policy, &valid_mach_seed()) {
+        Ok(init) => init,
+        Err(HsmError::UnsupportedAlgorithm) => {
+            eprintln!("backend does not support ML-DSA PartInit; skipping positive PQ flow");
+            return;
+        }
+        Err(error) => panic!("ML-DSA PartInit failed: {error:?}"),
+    };
     let chain = pota.chain_for(csr_public_key(&init.pta_csr));
     let certs = chain.der_items();
     let certs: Vec<_> = certs.iter().map(|cert| HsmCert { cert }).collect();

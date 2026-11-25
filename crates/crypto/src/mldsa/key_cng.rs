@@ -15,7 +15,7 @@ pub(super) fn expand_key(
 ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     CngPqcKey::import(variant.parameter_name(), PqcBlob::DsaSeed, seed)
         .and_then(|key| key.export(PqcBlob::DsaPrivate, variant.sec_key_len()))
-        .map_err(|_| CryptoError::MlDsaKeyGenError)
+        .map_err(|error| crate::pqc_cng::keygen_error(error, CryptoError::MlDsaKeyGenError))
 }
 
 pub(super) fn public_key(variant: MlDsaVariant, sk: &[u8]) -> Result<Vec<u8>, CryptoError> {

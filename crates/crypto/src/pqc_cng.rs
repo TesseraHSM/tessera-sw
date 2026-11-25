@@ -4,11 +4,22 @@
 //! Shared Windows CNG PQC key blob import/export.
 
 use windows::Win32::Foundation::E_INVALIDARG;
+use windows::Win32::Foundation::STATUS_NOT_FOUND;
+use windows::Win32::Foundation::STATUS_NOT_SUPPORTED;
 use windows::Win32::Security::Cryptography::*;
 use windows::core::Error;
 use windows::core::PCWSTR;
 use windows::core::w;
 use zeroize::Zeroizing;
+
+pub(crate) fn keygen_error(error: Error, failure: crate::CryptoError) -> crate::CryptoError {
+    let code = error.code();
+    if code == STATUS_NOT_SUPPORTED.to_hresult() || code == STATUS_NOT_FOUND.to_hresult() {
+        crate::CryptoError::PqcUnavailable
+    } else {
+        failure
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum PqcBlob {
@@ -142,5 +153,36 @@ impl Drop for CngPqcKey {
     fn drop(&mut self) {
         // SAFETY: this owns the key; its algorithm provider drops afterwards.
         let _ = unsafe { BCryptDestroyKey(self.handle) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::Foundation::STATUS_INVALID_PARAMETER;
+    use windows::Win32::Foundation::STATUS_NO_MEMORY;
+
+    use super::*;
+    use crate::CryptoError;
+
+    #[test]
+    fn unsupported_provider_is_distinct_from_key_generation_failures() {
+        for status in [STATUS_NOT_SUPPORTED, STATUS_NOT_FOUND] {
+            assert!(matches!(
+                keygen_error(
+                    status.ok().expect_err("failure status"),
+                    CryptoError::MlDsaKeyGenError
+                ),
+                CryptoError::PqcUnavailable
+            ));
+        }
+        for status in [STATUS_INVALID_PARAMETER, STATUS_NO_MEMORY] {
+            assert!(matches!(
+                keygen_error(
+                    status.ok().expect_err("failure status"),
+                    CryptoError::MlDsaKeyGenError
+                ),
+                CryptoError::MlDsaKeyGenError
+            ));
+        }
     }
 }

@@ -589,8 +589,7 @@ impl HsmIoController for UnoHsmPal {
     /// must describe exactly `src.len()` payload bytes.
     async fn send_oob(&self, io: &UnoHsmIo, index: usize, src: &HsmDmaBuf) -> HsmResult<()> {
         let desc = self.oob_desc(io, index).await?;
-        crate::gdma::raw_sgl_len(&desc, src.len())?;
-        self.send_oob_desc(io, desc, src).await
+        self.send_oob_desc(io, desc, src, true).await
     }
 
     async fn send_oob_bounded(
@@ -600,7 +599,7 @@ impl HsmIoController for UnoHsmPal {
         src: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let desc = self.oob_desc(io, index).await?;
-        self.send_oob_desc(io, desc, src).await
+        self.send_oob_desc(io, desc, src, false).await
     }
 
     async fn complete_io(&self, io: &mut Self::Io) -> HsmResult<()> {
@@ -807,10 +806,15 @@ impl UnoHsmPal {
         io: &UnoHsmIo,
         desc: [u8; OOB_ENTRY_LEN as usize],
         src: &HsmDmaBuf,
+        exact: bool,
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |scope| {
             let scratch = scope.dma_alloc(OOB_ENTRY_LEN as usize)?;
-            self.copy_to_host_sgl(io, scratch, src, &desc).await
+            if exact {
+                self.copy_to_host_sgl_exact(io, scratch, src, &desc).await
+            } else {
+                self.copy_to_host_sgl(io, scratch, src, &desc).await
+            }
         })
         .await
     }

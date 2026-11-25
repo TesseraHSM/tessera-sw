@@ -672,6 +672,33 @@ impl HsmGdmaController for UnoHsmPal {
 }
 
 impl UnoHsmPal {
+    pub(crate) async fn copy_to_host_sgl_exact(
+        &self,
+        io: &UnoHsmIo,
+        scratch: &mut HsmDmaBuf,
+        src: &HsmDmaBuf,
+        desc: &[u8; 16],
+    ) -> HsmResult<()> {
+        tsra_fw_hsm_io::validate_exact_sgl(desc, src.len(), async |addr| {
+            self.gdma
+                .copy_mem(
+                    host_sgl_block(addr, SGL_DESC_LEN),
+                    host_interface(io.pid())?,
+                    SGL_DESC_LEN,
+                    device_dma_buf(scratch.as_mut_ptr(), SGL_DESC_LEN),
+                    MemInterface::Device,
+                    SGL_DESC_LEN,
+                )?
+                .await?;
+            let bytes: &[u8] = &scratch[..SGL_DESC_LEN as usize];
+            bytes.try_into().map_err(|_| HsmError::InternalError)
+        })
+        .await?;
+        HostSgl::new(desc, src.len())?
+            .write_from(self, io, scratch, src)
+            .await
+    }
+
     /// Copy `src` to the start of the host buffer named by the raw SGL
     /// descriptor `desc`, which must describe at least `src.len()` bytes.
     /// The GDMA does not honor an SGL as a host destination, so this walks

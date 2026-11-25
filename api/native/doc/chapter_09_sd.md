@@ -76,6 +76,12 @@ chains but **always verifies the signature embedded in the backup**.
 SD transfer uses HPKE Base and AES-256-GCM. The recipient sealing key's
 `bits` property selects its KEM; PQ suites use SHAKE256 rather than HKDF-SHA384.
 
+An unsupported TBOR algorithm or certificate bank reports
+`TSRA_STATUS_UNSUPPORTED_ALGORITHM`. API revision alone does not establish
+PQ capability: session authentication also requires PQ support in the host
+crypto provider and a supported authenticated certificate path. Other device
+failures must not be treated as an unsupported-capability result.
+
  | `bits` | Recipient KEM | Masked key | ES384 signed backup | ML-DSA-87 signed backup |
  | ------ | ------------- | ---------- | ------------------- | ---------------------- |
  | 384 | DHKEM(P-384, HKDF-SHA384) | 280 B | 431 B | 4963 B |

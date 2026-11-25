@@ -195,8 +195,28 @@ fn open_session_ex_mlkem1024_authenticates_rotates_and_recovers_both_roles() {
     }
     let _guard = PARTITION_LOCK.lock();
     let suite = HsmSessionSuite::MlKem1024MlDsa87;
+    let host_available = crate::utils::partition_ex_helpers::host_pqc_available(
+        tsra_crypto::MlDsaPrivateKey::from_seed(tsra_crypto::MlDsaVariant::MlDsa87, &[7; 32]),
+    ) && crate::utils::partition_ex_helpers::host_pqc_available(
+        tsra_crypto::MlKemPrivateKey::from_seed(tsra_crypto::MlKemVariant::MlKem1024, &[7; 64]),
+    );
     for role in [HsmPskId::CO, HsmPskId::CU] {
         let (part, rev) = new_partition();
+        if !crate::utils::partition_ex_helpers::backend_mldsa_available(&part) {
+            assert!(matches!(
+                part.open_session_ex(
+                    rev,
+                    &test_root_spki_sha384(&part),
+                    HsmSessionPsk::new(role),
+                    suite,
+                ),
+                Err(HsmError::UnsupportedAlgorithm)
+            ));
+            continue;
+        }
+        if !host_available {
+            continue;
+        }
         let root =
             crate::utils::partition_ex_helpers::test_root_spki_sha384_for_suite(&part, suite);
         let pem = part.cert_chain_mldsa(0).expect("ML-DSA certificate bank");

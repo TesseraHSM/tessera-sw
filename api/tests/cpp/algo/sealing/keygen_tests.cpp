@@ -530,10 +530,13 @@ TEST_F(tsra_sealing_keygen, key_gen_pq_kems_follow_bits)
             auto algo = sealing_algo();
             auto prop_list = props.list();
             tsra_handle key_handle = 0;
-            ASSERT_EQ(
-                tsra_key_gen(sess_handle, &algo, &prop_list, &key_handle),
-                TSRA_STATUS_SUCCESS
-            );
+            auto status = tsra_key_gen(sess_handle, &algo, &prop_list, &key_handle);
+            if (status == TSRA_STATUS_UNSUPPORTED_ALGORITHM)
+            {
+                ASSERT_EQ(key_handle, 0);
+                GTEST_SKIP() << "backend does not support sealing KEM with bits=" << c.bits;
+            }
+            ASSERT_EQ(status, TSRA_STATUS_SUCCESS);
             auto key_guard =
                 scope_guard::make_scope_exit([&key_handle] { tsra_key_delete(key_handle); });
 

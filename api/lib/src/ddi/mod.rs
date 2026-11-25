@@ -191,6 +191,7 @@ impl From<DdiError> for HsmError {
             DdiError::DriverError(DriverError::IoAborted) => HsmError::IoAborted,
             DdiError::DriverError(DriverError::IoAbortInProgress) => HsmError::IoAbortInProgress,
             DdiError::DeviceNotReady => HsmError::DeviceNotReady,
+            DdiError::TborStatus(TborStatus::UnsupportedCmd) => HsmError::UnsupportedAlgorithm,
             DdiError::DdiStatus(DdiStatus::CredentialsNotEstablished) => {
                 HsmError::CredentialsNotEstablished
             }
@@ -620,6 +621,18 @@ mod tests {
         assert_eq!(
             HsmError::from(DdiError::TborStatus(TborStatus::VaultNotFound)),
             HsmError::DdiCmdFailure
+        );
+    }
+
+    #[test]
+    fn unsupported_tbor_command_is_distinct_from_operational_failure() {
+        assert_eq!(
+            HsmError::from(DdiError::TborStatus(TborStatus::UnsupportedCmd)),
+            HsmError::UnsupportedAlgorithm,
+        );
+        assert_eq!(
+            HsmError::from(DdiError::TborStatus(TborStatus::VaultNotFound)),
+            HsmError::DdiCmdFailure,
         );
     }
 }
