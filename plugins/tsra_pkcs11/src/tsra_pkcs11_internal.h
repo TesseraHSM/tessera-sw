@@ -196,5 +196,44 @@ void tsra_pkcs11_cipher_op_free(void *op_ctx);
  * tsra_pkcs11_sign.c, which owns the type. */
 void tsra_pkcs11_sign_op_free(void *op_ctx);
 
+/*
+ * Store one key object the device has just made: the object from `full` and,
+ * when `blob` is non-NULL, the masked blob as its key body; a session object
+ * (`token` FALSE) goes on the owned list of `s`. On failure nothing remains: a
+ * key object without its masked body, or one the session cannot track, is not
+ * handed out. Defined in tsra_pkcs11_crypt.c.
+ */
+CK_RV tsra_pkcs11_store_key(
+    tsra_pkcs11_session_t *s,
+    const CK_ATTRIBUTE *full,
+    CK_ULONG n,
+    CK_BBOOL token,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    CK_OBJECT_HANDLE *out
+);
+
+/* Destroy a key object this call created (one half of a pair whose other half
+ * failed), and take it off the session's owned list. Defined in
+ * tsra_pkcs11_crypt.c. */
+void tsra_pkcs11_discard_key(tsra_pkcs11_session_t *s, CK_OBJECT_HANDLE h);
+
+/*
+ * The C_GenerateKeyPair generator of CKM_RSA_PKCS_KEY_PAIR_GEN (keypair_fn in
+ * tsra_pkcs11_crypt.c, which has checked the arguments, the mechanism and the
+ * login): the partition's RSA unwrapping key pair as a new pair of objects.
+ * Defined in tsra_pkcs11_unwrap.c.
+ */
+CK_RV tsra_pkcs11_unwrapping_pair_generate(
+    tsra_pkcs11_session_t *s,
+    uint32_t hsm_session,
+    const CK_ATTRIBUTE *pub,
+    CK_ULONG pub_count,
+    const CK_ATTRIBUTE *priv,
+    CK_ULONG priv_count,
+    CK_OBJECT_HANDLE *h_pub,
+    CK_OBJECT_HANDLE *h_priv
+);
+
 /* Fill a fixed-width, space-padded CK_UTF8CHAR string field. */
 void tsra_pkcs11_pad_str(CK_UTF8CHAR *dst, size_t dstlen, const char *src);

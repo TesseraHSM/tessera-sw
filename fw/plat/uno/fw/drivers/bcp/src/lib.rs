@@ -12,9 +12,9 @@
 //! host's SGLs), and for the bulk XTS self-test ([`BcpDriver::xts`], on
 //! GSRAM buffers). With `bulk_crypto` the FP firmware owns the engine
 //! for host bulk IOs, and the HSM must not touch it.
-//! The driver programs one 32-entry submission/completion queue pair and
+//! The driver programs one 64-entry submission/completion queue pair and
 //! DFL list 0 in GSRAM, and submits AES-256 commands of up to four 4 KiB
-//! chunks, up to 31 at a time while their chunks fit the ring; further
+//! chunks, up to 63 at a time while their chunks fit the ring; further
 //! commands queue in the driver and start, in order, as completions free
 //! room. Each in-flight command owns the two key-vault slots (data
 //! key, XTS tweak key) and the DFL entry matching its command ID.

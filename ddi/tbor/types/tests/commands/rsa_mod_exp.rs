@@ -3,29 +3,26 @@
 
 //! Integration tests for the TBOR `RsaModExp` command.
 //!
-//! `RsaModExp` performs the RSA private-key primitive `x = y^d mod n`
-//! using a caller-held **masked** RSA private key (imported via
-//! [`UnwrapKey`](super::unwrap_key) with the RSA / RSA-CRT key class).
-//! These tests import a host-generated RSA key on-device (RSA-AES-wrap its
-//! DER, unwrap into a masked blob), run the modular exponentiation, and
-//! verify the result on the host with `tsra_crypto` (raw, unpadded RSA)
-//! — exercising the full `UnwrapKey`(Rsa) → `RsaModExp` path for both CRT
-//! and non-CRT vault forms.
-//!
-//! The device speaks the PKA-native **little-endian** wire format for the
-//! `y` input and `x` output; `tsra_crypto` (OpenSSL) is big-endian
-//! native, so the tests reverse each operand at the boundary.
+//! `RsaModExp` performs raw RSA private- or public-exponent operations using
+//! a caller-held **masked** RSA private key (imported via
+//! [`UnwrapKey`](super::unwrap_key) with the RSA / RSA-CRT key class). The
+//! tests import host-generated keys, exercise both CRT and non-CRT vault
+//! forms, and compare results with independent host operations.
 
+use tsra_crypto::testvectors::rsa::RSA_PKCS1_TEST_VECTORS;
 use tsra_crypto::Encrypter;
 use tsra_crypto::ExportableKey;
+use tsra_crypto::ImportableKey;
 use tsra_crypto::Key;
 use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::PrivateKey;
 use tsra_crypto::RsaEncryptAlgo;
+use tsra_crypto::RsaKeyOp;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_crypto::RsaSignAlgo;
 use tsra_crypto::Verifier;
+use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborRsaModExpReq;
@@ -38,7 +35,9 @@ use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::RSA_OP_DECRYPT;
+use tsra_ddi_tbor_types::RSA_OP_ENCRYPT;
 use tsra_ddi_tbor_types::RSA_OP_SIGN;
+use tsra_ddi_tbor_types::RSA_OP_VERIFY;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::assert_rsa_decrypts;
@@ -108,6 +107,71 @@ fn decrypt_roundtrip(ctx: &TestCtx, session_id: u16, modulus_bytes: usize, crt: 
     assert_rsa_decrypts(ctx, session_id, masked_key, &pubkey, modulus_len);
 }
 
+fn public_operation_matches_host(
+    ctx: &TestCtx,
+    session_id: u16,
+    modulus_bytes: usize,
+    crt: bool,
+    op_type: u8,
+    usage: u64,
+) {
+    let (masked_key, pubkey, modulus_len) = import_rsa(ctx, session_id, modulus_bytes, crt, usage);
+    assert_public_operation_matches_host(
+        ctx,
+        session_id,
+        masked_key,
+        &pubkey,
+        modulus_len,
+        op_type,
+    );
+}
+
+fn assert_public_operation_matches_host(
+    ctx: &TestCtx,
+    session_id: u16,
+    masked_key: Vec<u8>,
+    pubkey: &RsaPublicKey,
+    modulus_len: usize,
+    op_type: u8,
+) {
+    let input = test_integer(modulus_len);
+    let expected = Encrypter::encrypt_vec(&mut RsaEncryptAlgo::with_no_padding(), pubkey, &input)
+        .expect("independent host raw RSA public operation");
+    let result = mod_exp(ctx, session_id, masked_key, op_type, rev(&input));
+    assert_eq!(result.len(), modulus_len);
+    assert_eq!(rev(&result), expected);
+}
+
+fn non_default_exponent_matches_host(op_type: u8, usage: u64) {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let vector = RSA_PKCS1_TEST_VECTORS.first().expect("RSA NIST fixture");
+    let key = RsaPrivateKey::from_bytes(vector.priv_der).expect("import NIST RSA key");
+    let pubkey = key.public_key().expect("derive NIST public key");
+    assert_ne!(pubkey.e_vec().expect("public exponent"), [1, 0, 1]);
+    for class in [KEY_CLASS_RSA, KEY_CLASS_RSA_CRT] {
+        let imported = unwrap_with_usage(&ctx, session.session_id, class, usage, vector.priv_der);
+        assert_public_operation_matches_host(
+            &ctx,
+            session.session_id,
+            imported.masked_key,
+            &pubkey,
+            key.size(),
+            op_type,
+        );
+    }
+}
+
+#[test]
+fn rsa_mod_exp_encrypt_uses_non_default_exponent() {
+    non_default_exponent_matches_host(RSA_OP_ENCRYPT, KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT);
+}
+
+#[test]
+fn rsa_mod_exp_verify_uses_non_default_exponent() {
+    non_default_exponent_matches_host(RSA_OP_VERIFY, KEY_USAGE_SIGN | KEY_USAGE_VERIFY);
+}
+
 /// Verify raw RSA-2048 signing with a non-CRT key.
 #[test]
 fn rsa_mod_exp_sign_roundtrip_2k() {
@@ -170,6 +234,39 @@ fn rsa_mod_exp_decrypt_roundtrip_2k_crt() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     decrypt_roundtrip(&ctx, session.session_id, 256, true);
+}
+
+/// CRT and non-CRT imports of the same key agree for both public operations.
+#[test]
+fn rsa_mod_exp_rsa_crt_public_operations_equivalent() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let key = RsaPrivateKey::generate(256).expect("generate RSA-2048 key");
+    let der = key.to_vec().expect("export RSA private DER");
+    let message = rev(&test_integer(key.size()));
+
+    for (op_type, usage) in [
+        (RSA_OP_ENCRYPT, KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT),
+        (RSA_OP_VERIFY, KEY_USAGE_SIGN | KEY_USAGE_VERIFY),
+    ] {
+        let standard = unwrap_with_usage(&ctx, session.session_id, KEY_CLASS_RSA, usage, &der);
+        let crt = unwrap_with_usage(&ctx, session.session_id, KEY_CLASS_RSA_CRT, usage, &der);
+        let standard_result = mod_exp(
+            &ctx,
+            session.session_id,
+            standard.masked_key,
+            op_type,
+            message.clone(),
+        );
+        let crt_result = mod_exp(
+            &ctx,
+            session.session_id,
+            crt.masked_key,
+            op_type,
+            message.clone(),
+        );
+        assert_eq!(standard_result, crt_result);
+    }
 }
 
 /// Reject a signing operand one byte shorter than the RSA modulus.
@@ -251,6 +348,120 @@ fn rsa_mod_exp_decrypt_roundtrip_4k_crt() {
     let session = finalized_co_session(&ctx);
 
     decrypt_roundtrip(&ctx, session.session_id, 512, true);
+}
+
+/// Compare device Encrypt with an independent host raw-RSA result at every
+/// supported size and for both private-key serialization classes.
+#[test]
+fn rsa_mod_exp_encrypt_matches_host_reference_all_sizes_and_key_classes() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    for (modulus_bytes, crt) in [
+        (256, false),
+        (256, true),
+        (384, false),
+        (384, true),
+        (512, false),
+        (512, true),
+    ] {
+        public_operation_matches_host(
+            &ctx,
+            session.session_id,
+            modulus_bytes,
+            crt,
+            RSA_OP_ENCRYPT,
+            KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+        );
+    }
+}
+
+/// Compare device Verify's recovered block with independent host public
+/// exponentiation at every size and for both private-key serialization classes.
+#[test]
+fn rsa_mod_exp_verify_matches_host_reference_all_sizes_and_key_classes() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    for (modulus_bytes, crt) in [
+        (256, false),
+        (256, true),
+        (384, false),
+        (384, true),
+        (512, false),
+        (512, true),
+    ] {
+        public_operation_matches_host(
+            &ctx,
+            session.session_id,
+            modulus_bytes,
+            crt,
+            RSA_OP_VERIFY,
+            KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        );
+    }
+}
+
+/// Device Encrypt followed by Decrypt recovers an admissible raw representative.
+#[test]
+fn rsa_mod_exp_encrypt_decrypt_roundtrip() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let (masked_key, _, modulus_len) = import_rsa(
+        &ctx,
+        session.session_id,
+        256,
+        false,
+        KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+    );
+    let message = test_integer(modulus_len);
+    let ciphertext = mod_exp(
+        &ctx,
+        session.session_id,
+        masked_key.clone(),
+        RSA_OP_ENCRYPT,
+        rev(&message),
+    );
+    assert_eq!(
+        rev(&mod_exp(
+            &ctx,
+            session.session_id,
+            masked_key,
+            RSA_OP_DECRYPT,
+            ciphertext,
+        )),
+        message
+    );
+}
+
+/// Device Sign followed by Verify recovers the raw encoded block.
+#[test]
+fn rsa_mod_exp_sign_verify_roundtrip() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let (masked_key, _, modulus_len) = import_rsa(
+        &ctx,
+        session.session_id,
+        256,
+        true,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+    );
+    let encoded = test_integer(modulus_len);
+    let signature = mod_exp(
+        &ctx,
+        session.session_id,
+        masked_key.clone(),
+        RSA_OP_SIGN,
+        rev(&encoded),
+    );
+    assert_eq!(
+        rev(&mod_exp(
+            &ctx,
+            session.session_id,
+            masked_key,
+            RSA_OP_VERIFY,
+            signature,
+        )),
+        encoded
+    );
 }
 
 /// Reject an empty signing operand.
@@ -845,6 +1056,120 @@ fn rsa_mod_exp_decrypt_with_sign_usage_rejected() {
     }
 }
 
+/// Public selectors require their exact paired RSA usage group; neither
+/// operation accepts the other group or an unrelated private usage.
+#[test]
+fn rsa_mod_exp_public_operation_permissions_separated() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    for (usage, denied_ops) in [
+        (
+            KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+            [RSA_OP_SIGN, RSA_OP_VERIFY],
+        ),
+        (
+            KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+            [RSA_OP_DECRYPT, RSA_OP_ENCRYPT],
+        ),
+    ] {
+        let (masked_key, _, modulus_len) = import_rsa(&ctx, session.session_id, 256, false, usage);
+        for op_type in denied_ops {
+            ctx.expect_fw_reject(
+                &TborRsaModExpReq {
+                    session_id: session.session_id,
+                    masked_key: masked_key.clone(),
+                    op_type,
+                    y: vec![0; modulus_len],
+                },
+                TborStatus::InvalidPermissions,
+            );
+        }
+    }
+}
+
+/// Public operations accept every representative below n and reject n and
+/// larger values, independent of the platform's operand byte order.
+#[test]
+fn rsa_mod_exp_public_representative_boundaries() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    for (op_type, usage) in [
+        (RSA_OP_ENCRYPT, KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT),
+        (RSA_OP_VERIFY, KEY_USAGE_SIGN | KEY_USAGE_VERIFY),
+    ] {
+        let (masked_key, pubkey, modulus_len) =
+            import_rsa(&ctx, session.session_id, 256, false, usage);
+        let mut modulus = vec![0; modulus_len];
+        pubkey.n(Some(&mut modulus)).expect("read public modulus");
+
+        let mut n_minus_one = modulus.clone();
+        subtract_one(&mut n_minus_one);
+        let mut n_minus_two = n_minus_one.clone();
+        subtract_one(&mut n_minus_two);
+        let accepted = [
+            vec![0; modulus_len],
+            {
+                let mut value = vec![0; modulus_len];
+                value[modulus_len - 1] = 1;
+                value
+            },
+            {
+                let mut value = vec![0; modulus_len];
+                value[modulus_len - 1] = 2;
+                value
+            },
+            n_minus_two,
+            n_minus_one,
+        ];
+        for value in accepted {
+            let result = ctx
+                .tbor(&TborRsaModExpReq {
+                    session_id: session.session_id,
+                    masked_key: masked_key.clone(),
+                    op_type,
+                    y: rev(&value),
+                })
+                .expect("public representative below n must be accepted");
+            assert_eq!(result.x.len(), modulus_len);
+        }
+
+        let mut n_plus_one = modulus.clone();
+        add_one(&mut n_plus_one);
+        for value in [modulus.clone(), n_plus_one, vec![0xFF; modulus_len]] {
+            ctx.expect_fw_reject(
+                &TborRsaModExpReq {
+                    session_id: session.session_id,
+                    masked_key: masked_key.clone(),
+                    op_type,
+                    y: rev(&value),
+                },
+                TborStatus::InvalidArg,
+            );
+        }
+    }
+}
+
+fn subtract_one(value: &mut [u8]) {
+    for byte in value.iter_mut().rev() {
+        if *byte == 0 {
+            *byte = 0xFF;
+        } else {
+            *byte -= 1;
+            break;
+        }
+    }
+}
+
+fn add_one(value: &mut [u8]) {
+    for byte in value.iter_mut().rev() {
+        let (next, carry) = byte.overflowing_add(1);
+        *byte = next;
+        if !carry {
+            break;
+        }
+    }
+}
+
 /// Empty masked keys are never valid private RSA keys.
 #[test]
 fn rsa_mod_exp_empty_masked_key_rejected() {
@@ -941,6 +1266,23 @@ fn rsa_mod_exp_invalid_session_rejected() {
         })
         .is_err(),
         "invalid session id must be rejected"
+    );
+}
+
+#[test]
+fn rsa_mod_exp_unknown_session_oversized_key_fails_host_encoding() {
+    let ctx = TestCtx::new();
+    let error = ctx
+        .tbor(&TborRsaModExpReq {
+            session_id: u16::MAX,
+            masked_key: vec![0x42; 8192],
+            op_type: RSA_OP_SIGN,
+            y: vec![1; 512],
+        })
+        .expect_err("oversized key must fail before device submission");
+    assert!(
+        matches!(error, DdiError::TborEncodeError),
+        "expected host encoding failure, got {error:?}",
     );
 }
 

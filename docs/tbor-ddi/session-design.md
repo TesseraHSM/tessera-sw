@@ -281,10 +281,12 @@ or apply the CU ordinary-command policy to CO sessions.
 The vault mapping, rather than only the reusable logical slot number, also
 supports ownership/cleanup of session-associated vault objects.
 
-Separate firmware-owned per-slot recovery metadata retains
-`SHA-384(masking_key)[0..16]` and one PSK-change-consumed bit across migration.
-Fresh close/free clears both; recovery does not reset them. A Pending recovery
-keeps its renegotiation reservation and cannot be evicted by a fresh open.
+Separate firmware-owned per-slot recovery metadata holds
+`SHA-384(masking_key)[0..16]` and one PSK-change-consumed bit. Migration and
+partition disable keep the fingerprint but clear the consumed bit, since both
+return the PSKs to their defaults. Fresh close/free clears both; recovery does
+not reset them. A Pending recovery keeps its renegotiation reservation and
+cannot be evicted by a fresh open.
 
 ## 5. Cryptographic definitions and key schedule
 
@@ -1257,8 +1259,9 @@ saved envelope inside the fresh protected channel. Firmware derives
 `BK_SESSION` using the stable partition `BK_BOOT`, validates the recovered
 masking-key metadata and per-slot fingerprint, then restores the original
 masking key. This preserves existing session-masked keys, not channel keys or
-sender counters. Migration retains current role PSKs and the consumed rotation
-bit; recovery authenticates the current PSK and captures its current binding.
+sender counters. Migration returns the role PSKs to their defaults and clears
+the consumed rotation bit, so recovery authenticates the default PSK, captures
+that binding, and the recovered session rotates its role PSK again.
 
 Failed recovery rolls back to `NeedsRenegotiation` without discarding recovery
 metadata. A new Init can replace an abandoned recovery Pending, but cannot

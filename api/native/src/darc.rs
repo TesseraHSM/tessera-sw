@@ -11,9 +11,9 @@
 
 use super::*;
 
-/// Maximum certificates in a DARC target/source certificate chain
-/// (`CertDescriptor[1..=2]`); the host layer re-checks the exact bound.
+/// Maximum target-chain depth; PID source chains additionally allow PTA.
 const DARC_CERT_CHAIN_MAX_CERTS: usize = 2;
+const DARC_SOURCE_CERT_CHAIN_MAX_CERTS: usize = 3;
 
 /// A DARC certificate chain: an array of `len` `tsra_buffer`s, each a
 /// DER-encoded certificate (root to leaf). The DER bytes are borrowed, not
@@ -30,15 +30,18 @@ pub struct TsraDarcCertChain {
 /// empty or oversized chain up front so a bogus `len` cannot trigger an
 /// unbounded allocation ahead of the host validation.
 #[allow(unsafe_code)]
-fn unpack_cert_chain(chain: &TsraDarcCertChain) -> Result<Vec<api::HsmCert<'_>>, TsraStatus> {
+fn unpack_cert_chain(
+    chain: &TsraDarcCertChain,
+    max_certs: usize,
+) -> Result<Vec<api::HsmCert<'_>>, TsraStatus> {
     let len = chain.len as usize;
-    if len == 0 || len > DARC_CERT_CHAIN_MAX_CERTS {
+    if len == 0 || len > max_certs {
         Err(TsraStatus::InvalidArgument)?;
     }
     validate_ptr(chain.certs)?;
     // SAFETY: `certs` is non-null and aligned for `TsraBuffer` (checked by
     // `validate_ptr`), the caller guarantees it points to `len` valid
-    // `tsra_buffer`s, and `len` is bounded by `DARC_CERT_CHAIN_MAX_CERTS`.
+    // `tsra_buffer`s, and `len` is bounded by the command's chain limit.
     let raw = unsafe { std::slice::from_raw_parts(chain.certs, len) };
     let mut certs = Vec::with_capacity(len);
     for buf in raw {
@@ -53,14 +56,14 @@ fn unpack_cert_chain(chain: &TsraDarcCertChain) -> Result<Vec<api::HsmCert<'_>>,
 /// Generates a new DARC key-exchange key (ECC-P384) on the calling
 /// session's partition and returns the masked private key plus its raw
 /// P-384 public key (`x ‖ y`, 96 bytes, big-endian per coordinate). Run on
-/// the target it yields the HPKE receiver identity; run on the source it
-/// yields the HPKE sender-auth identity. The key is not stored on the
+/// the target it yields the HPKE recipient key. The source uses its PID
+/// to authenticate export reports. The key is not stored on the
 /// device.
 ///
 /// @param[in] sess_handle Handle to the security-domain session
 /// @param[in] scope Requested key scope (1-byte `KeyScope` discriminant)
 /// @param[in,out] masked_key Output buffer for the masked KEX private key
-///                (`MASKED_KEX_KEY_LEN`, 276 B)
+///                (`MASKED_KEX_KEY_LEN`, 280 B)
 /// @param[in,out] pub_key Output buffer for the raw P-384 public key
 ///                (`KEX_PUB_KEY_LEN`, 96 B)
 ///
@@ -108,7 +111,7 @@ pub unsafe extern "C" fn tsra_darc_kex_key_gen(
 ///
 /// @param[in] sess_handle Handle to the security-domain session
 /// @param[in,out] masked_tmk Output buffer for the masked TMK
-///                (`MASKED_TMK_LEN`, 260 B)
+///                (`MASKED_TMK_LEN`, 264 B)
 ///
 /// @return `TsraStatus` indicating the result of the operation
 ///
@@ -137,11 +140,8 @@ pub unsafe extern "C" fn tsra_darc_tmk_gen(
 /// Input buffers for [`tsra_darc_tmk_export`].
 #[repr(C)]
 pub struct TsraDarcTmkExportParams {
-    /// Source's masked DARC KEX key (from `tsra_darc_kex_key_gen`),
-    /// exactly `MASKED_KEX_KEY_LEN` (276 B).
-    pub masked_sender_key: *const TsraBuffer,
     /// Masked TMK (from `tsra_darc_tmk_gen`), exactly `MASKED_TMK_LEN`
-    /// (260 B).
+    /// (264 B).
     pub masked_tmk: *const TsraBuffer,
     /// Partition policy CBOR document (at most 384 B) whose DATA key
     /// thumbprint anchors
@@ -153,14 +153,14 @@ pub struct TsraDarcTmkExportParams {
 
 /// @brief Seal a DARC TMK to an authenticated target
 ///
-/// Validates the target certificate chain against the policy DATA key thumbprint,
-/// then HPKE-Auth seals the TMK to the target's KEX key, returning the
-/// sealed TMK.
+/// Validates the target certificate chain against the policy `data_spki_thumbprint`,
+/// then HPKE Base seals the TMK to the target's KEX key and PID-signs the
+/// complete encrypted envelope directly as COSE_Sign1.
 ///
 /// @param[in] sess_handle Handle to the security-domain session
 /// @param[in] params Export input buffers
 /// @param[in,out] sealed_tmk Output buffer for the sealed TMK
-///                (`SEALED_TMK_LEN`, 145 B)
+///                (`SEALED_TMK_LEN`, 367 B), including the PID signature.
 ///
 /// @return `TsraStatus` indicating the result of the operation
 ///
@@ -169,8 +169,7 @@ pub struct TsraDarcTmkExportParams {
 /// - `sess_handle` must be a valid security-domain session handle.
 /// - `params` and each of its buffer pointers must be valid; the
 ///   `target_cert_chain.certs` array must hold `len` valid `tsra_buffer`s.
-/// - `sealed_tmk` must be a valid `tsra_buffer` with writable backing
-///   storage of the advertised length.
+/// - The output buffer must be valid and writable.
 #[unsafe(no_mangle)]
 #[allow(unsafe_code)]
 pub unsafe extern "C" fn tsra_darc_tmk_export(
@@ -182,17 +181,16 @@ pub unsafe extern "C" fn tsra_darc_tmk_export(
         let session = api::HsmSession::try_from(sess_handle)?;
         let params = deref_ptr(params)?;
 
-        let masked_sender_key: &[u8] = deref_ptr(params.masked_sender_key)?.try_into()?;
         let masked_tmk: &[u8] = deref_ptr(params.masked_tmk)?.try_into()?;
         let policy: &[u8] = deref_ptr(params.policy)?.try_into()?;
-        let target_cert_chain = unpack_cert_chain(&params.target_cert_chain)?;
+        let target_cert_chain =
+            unpack_cert_chain(&params.target_cert_chain, DARC_CERT_CHAIN_MAX_CERTS)?;
 
         let sealed_tmk = deref_mut_ptr(sealed_tmk)?;
         validate_output_buffer(sealed_tmk, api::SEALED_TMK_LEN)?;
 
-        let sealed =
-            session.darc_tmk_export(masked_sender_key, masked_tmk, policy, &target_cert_chain)?;
-        copy_to_buffer(sealed_tmk, &sealed)?;
+        let sealed = session.darc_tmk_export(masked_tmk, policy, &target_cert_chain)?;
+        copy_to_buffer(sealed_tmk, &sealed.sealed_tmk)?;
         Ok(())
     })
 }
@@ -201,29 +199,30 @@ pub unsafe extern "C" fn tsra_darc_tmk_export(
 #[repr(C)]
 pub struct TsraDarcTmkImportParams {
     /// Target's masked DARC KEX key (from `tsra_darc_kex_key_gen`),
-    /// exactly `MASKED_KEX_KEY_LEN` (276 B).
+    /// exactly `MASKED_KEX_KEY_LEN` (280 B).
     pub masked_kex_key: *const TsraBuffer,
     /// Partition policy CBOR document (at most 384 B) whose POTA key
     /// thumbprint anchors
     /// `remote_cert_chain`.
     pub policy: *const TsraBuffer,
     /// Sealed TMK (from `tsra_darc_tmk_export`), exactly `SEALED_TMK_LEN`
-    /// (145 B).
+    /// (367 B), including the PID signature.
     pub sealed_tmk: *const TsraBuffer,
-    /// POTA-anchored source certificate chain (1..=2 certs).
+    /// POTA-anchored source PID certificate chain (1..=3 certs).
     pub remote_cert_chain: TsraDarcCertChain,
 }
 
 /// @brief Import (open) a sealed DARC TMK on the target
 ///
-/// Validates the source certificate chain against the policy POTA key thumbprint,
-/// HPKE-Auth opens the sealed TMK, and re-masks it under the partition
+/// Authorizes the source PID chain against the policy `pota_spki_thumbprint`,
+/// verifies the `Darc` report and exact recipient/envelope binding,
+/// HPKE Base opens the sealed TMK, and re-masks it under the partition
 /// SDMK, returning the masked TMK.
 ///
 /// @param[in] sess_handle Handle to the security-domain session
 /// @param[in] params Import input buffers
 /// @param[in,out] masked_tmk Output buffer for the imported masked TMK
-///                (`MASKED_TMK_LEN`, 260 B)
+///                (`MASKED_TMK_LEN`, 264 B)
 ///
 /// @return `TsraStatus` indicating the result of the operation
 ///
@@ -248,7 +247,8 @@ pub unsafe extern "C" fn tsra_darc_tmk_import(
         let masked_kex_key: &[u8] = deref_ptr(params.masked_kex_key)?.try_into()?;
         let policy: &[u8] = deref_ptr(params.policy)?.try_into()?;
         let sealed_tmk: &[u8] = deref_ptr(params.sealed_tmk)?.try_into()?;
-        let remote_cert_chain = unpack_cert_chain(&params.remote_cert_chain)?;
+        let remote_cert_chain =
+            unpack_cert_chain(&params.remote_cert_chain, DARC_SOURCE_CERT_CHAIN_MAX_CERTS)?;
 
         let masked_tmk = deref_mut_ptr(masked_tmk)?;
         validate_output_buffer(masked_tmk, api::MASKED_TMK_LEN)?;
@@ -266,7 +266,7 @@ pub struct TsraDarcKeyWrapParams {
     /// Handle to the source EC private key to export (the transferred key).
     pub source_key: TsraHandle,
     /// Masked TMK (from `tsra_darc_tmk_gen` or `tsra_darc_tmk_import`),
-    /// exactly `MASKED_TMK_LEN` (260 B).
+    /// exactly `MASKED_TMK_LEN` (264 B).
     pub masked_tmk: *const TsraBuffer,
 }
 
@@ -324,7 +324,7 @@ pub unsafe extern "C" fn tsra_darc_key_wrap(
 #[repr(C)]
 pub struct TsraDarcKeyUnwrapParams {
     /// Masked TMK (from `tsra_darc_tmk_import`), exactly `MASKED_TMK_LEN`
-    /// (260 B).
+    /// (264 B).
     pub masked_tmk: *const TsraBuffer,
     /// AES-KWP-wrapped `COSE_Key` (from `tsra_darc_key_wrap`), at most
     /// `DARC_UNWRAP_WRAPPED_KEY_MAX_LEN` (512 B).

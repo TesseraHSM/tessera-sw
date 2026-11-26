@@ -282,22 +282,22 @@ fn test_live_migration_sim_basic() {
         },
     );
 }
-// Test: get sealed BK3, simulate live migration, set sealed BK3
+// Test: get sealed BK3, simulate live migration, the sealed BK3 is migrated
 #[test]
 fn test_live_migration_sealed_bk3() {
-    // Only this process's auto-started simulator gives a fresh partition after
-    // `erase()`; on hardware, NSSR preserves the sealed BK3, so the re-set
-    // below would fail with `SealedBk3AlreadySet`.
-    if !ddi_sock_server::autostarted() {
-        return;
-    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, _session_id| {
             // `init_bk3` is one-shot per power cycle; reuse the existing
-            // sealed BK3 if it has already been provisioned.
-            let sealed_bk3 = helper_get_or_init_bk3(dev);
+            // sealed BK3 if it has already been provisioned. With TPM-sourced
+            // keys the helper returns the unsealed BK3, so read the sealed
+            // blob back.
+            helper_get_or_init_bk3(dev);
+            let sealed_bk3 = helper_get_sealed_bk3(dev)
+                .expect("sealed BK3 before migration")
+                .data
+                .sealed_bk3;
             info!("Retrieved sealed BK3 data: {} bytes", sealed_bk3.len());
 
             let migration_result = dev.erase();
@@ -308,35 +308,27 @@ fn test_live_migration_sealed_bk3() {
             );
             info!("Live migration simulation completed successfully");
 
-            // Migration lands on a fresh partition: the host re-provisions the
-            // sealed BK3 it saved before migrating, exactly once.
+            // The sealed BK3 is part of the migrated state: the partition
+            // still holds it, so it cannot be set again.
             let set_result = helper_set_sealed_bk3(dev, sealed_bk3.as_slice().to_vec());
             assert!(
-                set_result.is_ok(),
-                "Setting sealed BK3 after migration should succeed: {:?}",
-                set_result
-            );
-            let reset_result = helper_set_sealed_bk3(dev, sealed_bk3.as_slice().to_vec());
-            assert!(
                 matches!(
-                    reset_result,
+                    set_result,
                     Err(DdiError::DdiStatus(DdiStatus::SealedBk3AlreadySet))
                 ),
-                "Second set should fail with SealedBk3AlreadySet: {:?}",
-                reset_result
+                "Set after migration should fail with SealedBk3AlreadySet: {:?}",
+                set_result
             );
 
-            // Verify: Get sealed BK3 again to confirm it was migrated correctly
             let sealed_bk3_after = helper_get_sealed_bk3(dev);
             assert!(
                 sealed_bk3_after.is_ok(),
-                "Failed to get sealed BK3 after setting: {:?}",
+                "Failed to get sealed BK3 after migration: {:?}",
                 sealed_bk3_after
             );
-            let sealed_bk3_after_data = sealed_bk3_after.unwrap();
-
             assert_eq!(
-                sealed_bk3, sealed_bk3_after_data.data.sealed_bk3,
+                sealed_bk3,
+                sealed_bk3_after.unwrap().data.sealed_bk3,
                 "Sealed BK3 data should be identical before and after migration"
             );
             info!("Verified sealed BK3 data integrity across migration");

@@ -11,8 +11,6 @@ use tsra_crypto::EccCurve;
 use tsra_crypto::EccKeyOp;
 use tsra_crypto::EccPrivateKey;
 use tsra_crypto::EccPublicKey;
-use tsra_crypto::HashAlgo;
-use tsra_crypto::HashOp;
 use tsra_crypto::HpkeOpenConfig;
 use tsra_crypto::HpkeSealConfig;
 use tsra_crypto::HpkeSuite;
@@ -20,6 +18,7 @@ use tsra_crypto::ImportableKey;
 use tsra_sealing_api::mint_sealing_key;
 use tsra_sealing_api::spki_thumbprint;
 use tsra_sealing_api::Evidence;
+use tsra_sealing_api::IdentityEvidence;
 use tsra_sealing_api::PartPolicy;
 use tsra_sealing_api::RemoteBackup;
 use tsra_sealing_api::RemoteRecovery;
@@ -28,11 +27,16 @@ use tsra_sealing_api::SecurityDomain;
 use tsra_sealing_api::SecurityDomainEnv;
 use tsra_sealing_api::SecurityDomainStore;
 use tsra_sealing_api::RAW_PUB_LEN;
+use tsra_sealing_common::evidence;
 use tsra_sealing_report::parse_ec2_cose_key_bytes;
 use tsra_sealing_report::parse_key_report_bytes;
+use tsra_sealing_report::parse_sd_transfer_report;
+use tsra_sealing_report::sd_header;
+use tsra_sealing_report::sign_software_sd_transfer;
 use tsra_sealing_report::verify_certificate_chain;
-use tsra_sealing_report::verify_key_report_bytes;
+use tsra_sealing_report::verify_sd_transfer_report;
 use tsra_sealing_report::Curve;
+use tsra_sealing_report::SD_HEADER_LEN;
 use x509::X509Certificate;
 use x509::X509CertificateOp;
 use zeroize::Zeroizing;
@@ -61,7 +65,6 @@ pub fn create(
         .try_into()
         .map_err(|_| anyhow::anyhow!("invalid SA public coordinates"))?;
     let chain = env.receiver_chain(&raw)?;
-    let sender_cert_chain = vec![chain.root_der.clone(), chain.leaf_der.clone()];
     let no_attestation = Evidence {
         mfgr_cert_chain: Vec::new(),
         owner_cert_chain: Vec::new(),
@@ -75,41 +78,67 @@ pub fn create(
         &no_attestation,
         |csr, report| env.sign_pta(csr, report),
     )?;
-    validate_evidence(&created.evidence, env.policy(), false)?;
-    let sender_public = reported_public_key(&created.evidence.report)?;
+    let source_pid = evidence::verify_transfer_source(
+        &created.evidence,
+        env.policy(),
+        &env.policy().pota_spki_thumbprint,
+        &created.pok_remote_backup,
+        Some(&raw),
+    )?;
+    anyhow::ensure!(
+        spki_thumbprint(&source_pid)?
+            == env
+                .policy()
+                .backup_part
+                .context("policy has no backing partition")?
+                .1,
+        "creation source PID mismatch"
+    );
     let receiver = mint_sealing_key(&session.session)
         .context("local recovery saved, but HSM remote receiver generation failed")?;
-    let mut receiver_evidence = created.evidence.clone();
-    receiver_evidence.report = receiver.report.clone();
-    validate_evidence(&receiver_evidence, env.policy(), false)?;
+    let receiver_evidence = Evidence {
+        mfgr_cert_chain: created.evidence.mfgr_cert_chain.clone(),
+        owner_cert_chain: created.evidence.owner_cert_chain.clone(),
+        part_owner_cert_chain: created.evidence.part_owner_cert_chain.clone(),
+        report: receiver.report.clone(),
+    };
+    evidence::verify_peer(&receiver_evidence, env.policy())?;
     let receiver_public = reported_public_key(&receiver.report)?;
     let (x, y) = receiver_public.coord_vec()?;
-    let raw: [u8; RAW_PUB_LEN] = [x, y]
+    let receiver_raw: [u8; RAW_PUB_LEN] = [x, y]
         .concat()
         .try_into()
         .map_err(|_| anyhow::anyhow!("invalid HSM receiver coordinates"))?;
-    let receiver_chain = env.receiver_chain(&raw)?;
+    let receiver_chain = env.receiver_chain(&receiver_raw)?;
+    let header = sd_header(&raw, &receiver_raw, env.policy().as_bytes())?;
 
     let remote_backup = reseal(
         &created.pok_remote_backup,
         &sa_key,
         &sa_public,
-        &sender_public,
         &receiver_public,
+        &header,
     )
     .context("local recovery saved, but external-SA HPKE open/reseal failed")?;
     let state = env
         .store()
         .load_security_domain()?
         .context("saved local SD recovery state is missing after creation")?;
+    let signed_backup = sign_software_sd_transfer(
+        &sa_key,
+        &raw,
+        &receiver_raw,
+        env.policy().as_bytes(),
+        &remote_backup,
+    )?;
     let remote = RemoteRecovery {
         backup: RemoteBackup {
-            pok_remote_backup: remote_backup,
-            evidence: created.evidence,
+            pok_remote_backup: signed_backup,
+            evidence: IdentityEvidence::default(),
         },
         masked_receiver_key: receiver.masked,
         sd_mk_backup: state.sd_mk_backup,
-        sender_cert_chain,
+        sender_pid_pub_key: tsra_sealing_report::p384_spki_from_raw(&raw)?,
         receiver_cert_chain: vec![receiver_chain.root_der, receiver_chain.leaf_der],
     };
     validate(&remote, env.policy())?;
@@ -136,45 +165,82 @@ fn reseal(
     original: &[u8],
     sa_private: &EccPrivateKey,
     sa_public: &EccPublicKey,
-    original_sender: &EccPublicKey,
     receiver: &EccPublicKey,
+    header: &[u8],
 ) -> Result<Vec<u8>> {
-    anyhow::ensure!(
-        original.len() == 161 && original[0] == 4,
-        "invalid remote HPKE seal"
-    );
-    let enc = EccPublicKey::from_coordinates(EccCurve::P384, &original[1..49], &original[49..97])?;
+    let original = parse_sd_transfer_report(original)?.envelope;
+    let enc =
+        EccPublicKey::from_coordinates(EccCurve::P384, &original[162..210], &original[210..258])?;
     let suite = HpkeSuite::DHKemP384Sha384AesGcm256;
-    let open = HpkeOpenConfig::auth(suite, sa_private, sa_public, &[], &[], original_sender);
+    let open = HpkeOpenConfig::base(
+        suite,
+        sa_private,
+        sa_public,
+        &original[..SD_HEADER_LEN],
+        &[],
+    );
     let mut plaintext = Zeroizing::new([0u8; 64]);
-    let length = hpke::open(&open, &enc, &original[97..], Some(&mut plaintext[..]))?;
+    let length = hpke::open(&open, &enc, &original[258..], Some(&mut plaintext[..]))?;
     anyhow::ensure!(length == 48, "remote backup did not contain a 48-byte BKS3");
-    let seal = HpkeSealConfig::auth(suite, receiver, &[], &[], sa_private);
+    let seal = HpkeSealConfig::base(suite, receiver, header, &[]);
     let sealed = hpke::seal_vec(&seal, &plaintext[..length])?;
     let (x, y) = sealed.enc.coord_vec()?;
-    Ok([vec![4], x, y, sealed.ct].concat())
+    Ok([header, &[4], &x, &y, &sealed.ct].concat())
 }
 
 pub fn validate(remote: &RemoteRecovery, policy: &PartPolicy) -> Result<()> {
     remote.validate()?;
+    let signer = tsra_sealing_report::p384_raw_from_spki(&remote.sender_pid_pub_key)?;
     let envelope = aead_envelope::inspect(&remote.masked_receiver_key)
         .context("decode remote receiver envelope")?;
     anyhow::ensure!(
         envelope.aad.len() == 192 && envelope.payload.len() == 48,
         "invalid remote receiver envelope shape"
     );
-    let external = !remote.sender_cert_chain.is_empty();
+    let external = remote.backup.evidence.mfgr_cert_chain.is_empty();
     if external {
         anyhow::ensure!(
             !policy.flags.require_trusted_sa_key(),
             "software SA cannot satisfy trusted-SA attestation"
         );
-        validate_hpke_chain(&remote.sender_cert_chain, policy)
-            .context("verify external-SA sender HPKE chain")?;
         validate_hpke_chain(&remote.receiver_cert_chain, policy)
             .context("verify HSM receiver HPKE chain")?;
+        let recipient = public_key(
+            remote
+                .receiver_cert_chain
+                .last()
+                .context("missing receiver certificate")?,
+        )?;
+        verify_sd_transfer_report(
+            &remote.backup.pok_remote_backup,
+            &signer,
+            policy.as_bytes(),
+            Some(&recipient),
+        )?;
+        anyhow::ensure!(
+            remote.backup.evidence.owner_cert_chain.is_empty()
+                && remote.backup.evidence.part_owner_cert_chain.is_empty(),
+            "software authority must not assert hardware provenance"
+        );
+    } else {
+        let anchor = if policy.flags.require_trusted_sa_key() {
+            policy
+                .sapota_spki_thumbprint
+                .as_ref()
+                .context("policy has no SAPOTA")?
+        } else {
+            &policy.pota_spki_thumbprint
+        };
+        let pid = evidence::verify_transfer_source(
+            &remote.backup.evidence,
+            policy,
+            anchor,
+            &remote.backup.pok_remote_backup,
+            None,
+        )?;
+        anyhow::ensure!(pid.as_slice() == signer, "restore source PID mismatch");
     }
-    validate_evidence(&remote.backup.evidence, policy, !external)
+    Ok(())
 }
 
 fn validate_hpke_chain(chain: &[Vec<u8>], policy: &PartPolicy) -> Result<()> {
@@ -205,53 +271,4 @@ fn public_key(certificate: &[u8]) -> Result<Vec<u8>> {
     let key = EccPublicKey::from_bytes(&certificate.get_public_key_der()?)?;
     let (x, y) = key.coord_vec()?;
     Ok([x, y].concat())
-}
-
-fn validate_evidence(evidence: &Evidence, policy: &PartPolicy, legacy: bool) -> Result<()> {
-    let mut digest = [0u8; 48];
-    HashAlgo::sha384().hash(policy.as_bytes(), Some(&mut digest))?;
-    let (_, backup_thumbprint) = policy
-        .backup_part
-        .context("policy has no backing partition")?;
-    for (name, chain) in [
-        ("manufacturer", &evidence.mfgr_cert_chain),
-        ("owner", &evidence.owner_cert_chain),
-        ("partition-owner", &evidence.part_owner_cert_chain),
-    ] {
-        if name == "owner" && chain.is_empty() {
-            continue;
-        }
-        verify_certificate_chain(chain)
-            .with_context(|| format!("verify remote sender {name} chain"))?;
-        let leaf = chain.last().context("remote sender chain is empty")?;
-        anyhow::ensure!(
-            spki_thumbprint(&public_key(leaf)?)? == backup_thumbprint,
-            "remote sender {name} leaf does not match the backing partition PID"
-        );
-        let report = verify_key_report_bytes(&evidence.report, leaf)
-            .with_context(|| format!("verify remote sender report against {name} leaf"))?;
-        anyhow::ensure!(
-            report.policy_hash == Some(digest.as_slice()),
-            "remote sender report policy binding mismatch"
-        );
-        let key = parse_ec2_cose_key_bytes(
-            report
-                .public_key
-                .get(..usize::from(report.public_key_size))
-                .context("invalid reported public key size")?,
-        )?;
-        anyhow::ensure!(key.curve == Curve::P384, "remote sender key must be P-384");
-    }
-    let chain = &evidence.part_owner_cert_chain;
-    let anchor = if legacy {
-        policy.sata_spki_thumbprint
-    } else {
-        policy.pota_spki_thumbprint
-    };
-    let anchored = chain_has_anchor(chain, &anchor)?;
-    anyhow::ensure!(
-        anchored,
-        "creation sender partition-owner chain does not match its policy anchor"
-    );
-    Ok(())
 }

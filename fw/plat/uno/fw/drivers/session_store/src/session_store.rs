@@ -122,6 +122,7 @@ impl SessionTable {
     }
 
     /// Validates that `id` refers to an allocated slot, returning its index.
+    #[inline]
     fn active_slot(&self, id: HsmSessId) -> HsmResult<usize> {
         let slot = u16::from(id) as usize;
         if slot >= MAX_SESSIONS || (self.alloc_mask() & (1 << slot)) == 0 {
@@ -174,7 +175,9 @@ impl SessionTable {
     /// # Errors
     ///
     /// - [`HsmError::SessionNotFound`] — `id` is not an allocated slot.
-    #[inline(never)]
+    ///
+    /// Inlined: every in-session request looks its session up this way.
+    #[inline]
     pub fn physical_id(&self, id: HsmSessId) -> HsmResult<HsmKeyId> {
         let slot = self.active_slot(id)?;
         Ok(HsmKeyId::from(self.phys_id(slot)))
@@ -296,7 +299,9 @@ impl SessionTable {
     /// [`Pending`](HsmSessionState::Pending); a renegotiation-flagged
     /// slot reports [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation);
     /// otherwise [`Active`](HsmSessionState::Active).
-    #[inline(never)]
+    ///
+    /// Inlined: every in-session request looks its session up this way.
+    #[inline]
     pub fn state(&self, id: HsmSessId) -> HsmSessionState {
         let Ok(slot) = self.active_slot(id) else {
             return HsmSessionState::Invalid;
@@ -362,7 +367,9 @@ impl SessionTable {
         self.region_mut()[ALLOC_MASK] = survivors;
         self.region_mut()[RENEGO_MASK] = survivors;
         self.region_mut()[PHYS_IDS..].fill(0);
-        self.0.session_recovery_mut()[128] &= survivors;
+        // Each caller (disable, NSSR) also resets the PSKs, so no survivor
+        // has used its change of the PSK it reauthenticates with.
+        self.0.session_recovery_mut()[128] = 0;
         for slot in 0..MAX_SESSIONS {
             if survivors & (1 << slot) == 0 {
                 self.0.session_recovery_mut()[slot * 16..slot * 16 + 16].fill(0);

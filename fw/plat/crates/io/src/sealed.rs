@@ -208,7 +208,9 @@ where
     let (data, trailer) = frame.split_at_mut(TRANSPORT_AAD_LEN + pt_len);
     data[..TRANSPORT_AAD_LEN].copy_from_slice(&binding.aad(true));
     let pt = &mut data[TRANSPORT_AAD_LEN..];
-    pt[..msg.len()].copy_from_slice(msg);
+    // Both buffers are DMA memory, which the CPU reads uncached: burst
+    // copy rather than a load per word.
+    msg.copy_to_slice(&mut pt[..msg.len()]);
     pt[msg.len()..pt_len - 1].fill(0);
     pt[pt_len - 1] = (pt_len - 1 - msg.len()) as u8;
     let key = pal
@@ -225,21 +227,45 @@ where
     Ok(&frame[TRANSPORT_AAD_LEN..])
 }
 
-/// Message length of the padded plaintext `pt`, or `None` if its padding
-/// is invalid.
-fn unpad(pt: &[u8]) -> Option<usize> {
-    let (&pad, body) = pt.split_last()?;
-    let pad = pad as usize;
+/// Message length of the padded plaintext `pt`, whole blocks, or `None` if
+/// its padding is invalid.
+///
+/// The padding lies within the last block, which is read out of DMA memory
+/// (uncached on Uno) with one burst rather than a load per byte, and
+/// checked a word at a time: the `p` bytes before the pad byte are zero iff
+/// the block's last nonzero byte before it lies in the message.
+fn unpad(pt: &HsmDmaBuf) -> Option<usize> {
+    const WORDS: usize = SEALED_BLOCK_LEN / 4;
+    let start = pt.len().checked_sub(SEALED_BLOCK_LEN)?;
+    let (words, _) = pt.split_at(start).1.read_head_words();
+    // Byte `i` of the block is bits `8 * (i % 4)..` of word `i / 4`.
+    let mut block = words.map(u32::from_le);
+    let pad = (block[WORDS - 1] >> 24) as usize;
     if pad >= SEALED_BLOCK_LEN {
         return None;
     }
-    let msg_len = body.len().checked_sub(pad)?;
-    body[msg_len..].iter().all(|&b| b == 0).then_some(msg_len)
+    block[WORDS - 1] &= 0x00FF_FFFF;
+    let msg = SEALED_BLOCK_LEN - 1 - pad;
+    // One past the last nonzero byte before the pad byte, 0 if none.
+    let end = block[..WORDS]
+        .iter()
+        .rposition(|&w| w != 0)
+        .map_or(0, |k| 4 * k + 4 - (block[k].leading_zeros() / 8) as usize);
+    (end <= msg).then_some(start + msg)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Views host bytes as a `&HsmDmaBuf`.
+    #[allow(unsafe_code)]
+    fn unpad_bytes(pt: &[u8]) -> Option<usize> {
+        // SAFETY: `from_raw` requires DMA-addressable memory, which is vacuous
+        // on the host: `unpad` only reads the bytes with the CPU, and
+        // `HsmDmaBuf` is a `[u8]` newtype borrowed no longer than `pt`.
+        unpad(unsafe { HsmDmaBuf::from_raw(pt) })
+    }
 
     #[test]
     fn frame_and_capacity_agree() {
@@ -257,13 +283,30 @@ mod tests {
         let mut pt = [0u8; 16];
         pt[..5].copy_from_slice(b"hello");
         pt[15] = 10;
-        assert_eq!(unpad(&pt), Some(5));
+        assert_eq!(unpad_bytes(&pt), Some(5));
         pt[15] = 11;
-        assert_eq!(unpad(&pt), None);
+        assert_eq!(unpad_bytes(&pt), None);
         pt[15] = 16;
-        assert_eq!(unpad(&pt), None);
+        assert_eq!(unpad_bytes(&pt), None);
         pt[15] = 10;
         pt[14] = 1;
-        assert_eq!(unpad(&pt), None);
+        assert_eq!(unpad_bytes(&pt), None);
+    }
+
+    #[test]
+    fn unpad_reads_the_last_block() {
+        let mut pt = [0u8; 48];
+        pt[..20].copy_from_slice(b"hello, sealed world!");
+        pt[47] = 27;
+        assert_eq!(unpad_bytes(&pt), None);
+        pt[47] = 15;
+        assert_eq!(unpad_bytes(&pt), Some(32));
+        pt[32] = 1;
+        assert_eq!(unpad_bytes(&pt), None);
+        pt[47] = 14;
+        assert_eq!(unpad_bytes(&pt), Some(33));
+        pt[47] = 0;
+        assert_eq!(unpad_bytes(&pt), Some(47));
+        assert_eq!(unpad_bytes(&pt[..15]), None);
     }
 }

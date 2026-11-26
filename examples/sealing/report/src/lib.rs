@@ -1,9 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Host-side decoding and signature verification of sealing key-attestation reports.
+//! Host-side decoding and signature verification of sealing reports.
 //!
-//! Supports the version 1 and 2 COSE_Sign1 formats emitted by the SDK.
+//! Supports PublicKey COSE_Sign1 v1/v2 and mandatory v2 SdBackup operation
+//! reports, canonical P-384 HPKE Base envelopes and software-authority signing.
 //! Decoding validates the encoding, not the signature, certificate chains,
 //! policy binding, or trustworthiness of the claims. All byte fields borrow
 //! the input; no DMA buffers or firmware APIs are required.
@@ -16,7 +17,7 @@
 //! separately; policy binding and freshness are not checked.
 
 mod certificates;
-
+mod transfer;
 use anyhow::Context;
 use anyhow::Result;
 use bitfield_struct::bitfield;
@@ -24,6 +25,7 @@ pub use certificates::verify_certificate_chain;
 pub use certificates::CertificateSummary;
 use minicbor::Decoder;
 use minicbor::Encoder;
+pub use transfer::*;
 use tsra_crypto::EccCurve;
 use tsra_crypto::EccPublicKey;
 use tsra_crypto::EcdsaAlgo;
@@ -64,7 +66,9 @@ pub struct KeyFlags {
     pub can_unwrap: bool,
     /// Key-derivation capability.
     pub can_derive: bool,
-    #[bits(22)]
+    /// HSM-generated SD sealing key.
+    pub is_sd_sealing: bool,
+    #[bits(21)]
     _reserved: u32,
 }
 
@@ -74,7 +78,7 @@ pub struct KeyFlags {
 /// [`verify_key_report_bytes`] to check their signature.
 pub struct KeyReport<'a> {
     payload: &'a [u8],
-    /// Report version: 1, or 2 when a policy digest is present.
+    /// PublicKey report version: 1 or 2, optionally discriminated in v2.
     pub version: u16,
     /// Padded COSE_Key field.
     pub public_key: &'a [u8],
@@ -129,10 +133,7 @@ pub fn parse_key_report_bytes(bytes: &[u8]) -> Result<KeyReport<'_>> {
     let entries = decoder
         .map()?
         .context("report must use a definite-length map")?;
-    anyhow::ensure!(
-        entries == 7 || entries == 8,
-        "unsupported report claim count"
-    );
+    anyhow::ensure!((7..=9).contains(&entries), "unsupported report claim count");
     let mut version = None;
     let mut public_key = None;
     let mut public_key_size = None;
@@ -141,10 +142,11 @@ pub fn parse_key_report_bytes(bytes: &[u8]) -> Result<KeyReport<'_>> {
     let mut report_data = None;
     let mut vm_launch_id = None;
     let mut policy_hash = None;
-    let mut seen = 0u8;
+    let mut kind = None;
+    let mut seen = 0u16;
     for _ in 0..entries {
         let label = decoder.u8().context("report claim label")?;
-        anyhow::ensure!(label <= 7, "unsupported report claim {label}");
+        anyhow::ensure!(label <= 8, "unsupported public-key report claim {label}");
         anyhow::ensure!(seen & (1 << label) == 0, "duplicate report claim {label}");
         seen |= 1 << label;
         match label {
@@ -156,6 +158,7 @@ pub fn parse_key_report_bytes(bytes: &[u8]) -> Result<KeyReport<'_>> {
             5 => report_data = Some(decoder.bytes()?),
             6 => vm_launch_id = Some(decoder.bytes()?),
             7 => policy_hash = Some(decoder.bytes()?),
+            8 => kind = Some(decoder.u8()?),
             _ => anyhow::bail!("unsupported report claim {label}"),
         }
     }
@@ -175,7 +178,15 @@ pub fn parse_key_report_bytes(bytes: &[u8]) -> Result<KeyReport<'_>> {
         policy_hash,
         signature,
     };
-    let expected_version = if report.policy_hash.is_some() { 2 } else { 1 };
+    let expected_version = if kind.is_some() || report.policy_hash.is_some() {
+        2
+    } else {
+        1
+    };
+    anyhow::ensure!(
+        kind.is_none() || kind == Some(0),
+        "expected PublicKey report"
+    );
     anyhow::ensure!(
         report.version == expected_version,
         "report version does not match its claims"

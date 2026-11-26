@@ -4,24 +4,30 @@
 /*
  * libFuzzer target over the device-free template decoders: the attribute type
  * table and its ceilings (src/tsra_pkcs11_attr_types.c), the C_CreateObject
- * and C_SetAttributeValue policy (src/tsra_pkcs11_attr_policy.c) and the AES
- * key-generation template check and build (src/tsra_pkcs11_template.c). The
- * input becomes a template whose values are slices of the input itself, so
- * every ulValueLen is honest and a finding is the module's, never caller UB.
- * The same template doubles as the object the C_SetAttributeValue check reads.
+ * and C_SetAttributeValue policy (src/tsra_pkcs11_attr_policy.c), the AES
+ * key-generation template check and build (src/tsra_pkcs11_template.c), and
+ * the unwrap and unwrapping key pair templates
+ * (src/tsra_pkcs11_unwrap_params.c). The input becomes a template whose values
+ * are slices of the input itself, so every ulValueLen is honest and a finding
+ * is the module's, never caller UB. The same template doubles as the object
+ * the C_SetAttributeValue check reads.
  *
  *   clang-18 -g -O1 -fsanitize=fuzzer,address,undefined -I ../include/pkcs11-v3.1 \
  *       -I ../src template_fuzz.c ../src/tsra_pkcs11_attr_types.c \
  *       ../src/tsra_pkcs11_attr_policy.c ../src/tsra_pkcs11_template.c \
+ *       ../src/tsra_pkcs11_unwrap_params.c ../src/tsra_pkcs11_digest.c \
  *       -o template_fuzz && ./template_fuzz -max_total_time=60
  *
  * Besides the sanitizers it traps when the checks disagree: a template the
- * C_CreateObject policy or the keygen check accepts must also pass the type
- * table, and a built keygen template never outgrows its documented headroom.
+ * C_CreateObject policy, the keygen or the unwrap check accepts must also pass
+ * the type table, a built keygen or unwrap template never outgrows its
+ * documented headroom, and no template asks for both halves of the unwrapping
+ * key pair at once (one wraps, the other unwraps).
  */
 
 #include "tsra_pkcs11_attr_policy.h"
 #include "tsra_pkcs11_template.h"
+#include "tsra_pkcs11_unwrap_params.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -53,6 +59,11 @@ static const CK_ATTRIBUTE_TYPE TYPES[] = {
     CKA_WRAP_WITH_TRUSTED,
     CKA_ALWAYS_SENSITIVE,
     CKA_MODULUS,
+    CKA_MODULUS_BITS,
+    CKA_PUBLIC_EXPONENT,
+    CKA_WRAP,
+    CKA_UNWRAP,
+    CKA_SIGN,
 };
 
 #define TYPE_INDEX_MASK 0x7Fu
@@ -152,11 +163,35 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         tsra_pkcs11_keygen_fill fill;
         CK_ATTRIBUTE full[TEMPLATE_MAX_ATTRS + KEYGEN_APPENDED_ATTRS];
         CK_ULONG n = 0;
-        if ((tsra_pkcs11_keygen_build_template(pol, tmpl, count, &fill, full, &n) != CKR_OK) ||
+        if ((tsra_pkcs11_keygen_build_template(pol, tmpl, count, true, &fill, full, &n) != CKR_OK
+            ) ||
             (n > (count + KEYGEN_APPENDED_ATTRS)))
         {
             __builtin_trap();
         }
+    }
+
+    /* A blob length up to 1020 bytes reaches every length the unwrap takes. */
+    static tsra_pkcs11_unwrap_target target;
+    if ((tsra_pkcs11_unwrap_check_template(tmpl, count, (CK_ULONG)flags * 4u, &target) == CKR_OK) &&
+        ((shapes != CKR_OK) || (target.count > (count + 1))))
+    {
+        __builtin_trap();
+    }
+    CK_BBOOL pub_token = CK_FALSE;
+    CK_BBOOL priv_token = CK_FALSE;
+    CK_RV pair = tsra_pkcs11_unwrapping_pair_check(
+        CKM_RSA_PKCS_KEY_PAIR_GEN,
+        tmpl,
+        count,
+        tmpl,
+        count,
+        &pub_token,
+        &priv_token
+    );
+    if (pair == CKR_OK)
+    {
+        __builtin_trap();
     }
 
     fuzz_obj obj = { tmpl, count };

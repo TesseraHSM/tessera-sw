@@ -281,6 +281,8 @@ pub enum HsmError {
 
     /// An ML-KEM key pair failed its encapsulate/decapsulate PCT.
     PctValidationMlKemGenKeyFailed = 0x087000E9,
+    /// An RSA signature did not verify.
+    RsaVerifyFailed = 0x0870010E,
 
     /// The CU session authenticated with the public default PSK, which
     /// has since been rotated. Close and reopen with the new credential.
