@@ -21,8 +21,8 @@
 //! the partition once, then drives many real session open/close cycles
 //! (including concurrently) against the one initialized partition.
 //!
-//! Each test spawns its own `ddi_sock_server`, so it runs regardless of the
-//! transport `TSRA_TEST_ARGS` selects.
+//! Each test spawns its own `ddi_sock_server` and runs only when
+//! `TSRA_TEST_ARGS` selects the socket transport; hardware runs skip it.
 
 use std::io;
 use std::net::TcpListener;
@@ -186,6 +186,11 @@ fn open_partition_with_retry(path: &str, api_rev: HsmApiRev, timeout: Duration) 
 /// initializes at startup.
 #[test]
 fn many_sequential_sessions_do_not_exhaust_partition() {
+    // Only applicable to the socket transport: the test drives its own
+    // `ddi_sock_server` rather than the selected device.
+    if !tsra_ddi::sock_selected() {
+        return;
+    }
     if !crate::utils::session::api_rev_at_most(1, 1) {
         return;
     }
@@ -233,6 +238,11 @@ fn many_sequential_sessions_do_not_exhaust_partition() {
 /// others.
 #[test]
 fn many_concurrent_sessions_are_all_usable() {
+    // Only applicable to the socket transport: the test drives its own
+    // `ddi_sock_server` rather than the selected device.
+    if !tsra_ddi::sock_selected() {
+        return;
+    }
     if !crate::utils::session::api_rev_at_most(1, 1) {
         return;
     }
