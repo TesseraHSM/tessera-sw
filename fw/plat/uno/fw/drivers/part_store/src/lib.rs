@@ -17,7 +17,8 @@
 //!
 //! GSRAM is plain shared SRAM (not a peripheral), so the accessors use
 //! ordinary non-volatile reads/writes. The platform-agnostic partition logic
-//! lives in the PAL; this driver only provides the storage substrate. Byte
+//! lives in the PAL; this driver provides the storage substrate and pure
+//! transitions for its persisted PIN-policy context. Byte
 //! buffers are handed out as [`HsmDmaBuf`](tsra_fw_hsm_pal_traits::HsmDmaBuf) so
 //! the PAL can feed them straight to the crypto / DMA engines.
 
@@ -25,6 +26,7 @@
 #![allow(unsafe_code)]
 
 mod part_store;
+pub mod pin_policy;
 
 pub use part_store::HsmPartId;
 pub use part_store::PartResetKind;

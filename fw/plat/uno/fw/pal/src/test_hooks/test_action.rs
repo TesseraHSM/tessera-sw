@@ -31,6 +31,8 @@ use super::common::success_hdr;
 use super::get_priv_key;
 #[cfg(feature = "fips_validation_hooks")]
 use super::get_rng;
+#[cfg(feature = "tsra_test_hooks")]
+use super::pin_policy;
 #[cfg(feature = "fips_validation_hooks")]
 use super::raw_key_import;
 #[cfg(feature = "tsra_test_hooks")]
@@ -64,6 +66,10 @@ enum SupportedTestAction {
     /// Inject a crash into the HSM/Admin/FP cores.
     #[cfg(feature = "tsra_test_hooks")]
     TriggerCrash = 8,
+    #[cfg(feature = "tsra_test_hooks")]
+    PinPolicyOverride = 10,
+    #[cfg(feature = "tsra_test_hooks")]
+    PinPolicyClear = 11,
     /// Clear the partition's stored user credential.
     #[cfg(feature = "tsra_test_hooks")]
     ClearUserCredentials = 18,
@@ -96,6 +102,14 @@ impl TryFrom<u32> for SupportedTestAction {
             return Ok(Self::TriggerCrash);
         }
         #[cfg(feature = "tsra_test_hooks")]
+        if value == Self::PinPolicyOverride as u32 {
+            return Ok(Self::PinPolicyOverride);
+        }
+        #[cfg(feature = "tsra_test_hooks")]
+        if value == Self::PinPolicyClear as u32 {
+            return Ok(Self::PinPolicyClear);
+        }
+        #[cfg(feature = "tsra_test_hooks")]
         if value == Self::ClearUserCredentials as u32 {
             return Ok(Self::ClearUserCredentials);
         }
@@ -126,6 +140,30 @@ pub(super) async fn dispatch<'p>(
     let selector = decode_action_selector(decoder)?;
 
     match selector.action {
+        #[cfg(feature = "tsra_test_hooks")]
+        SupportedTestAction::PinPolicyOverride => {
+            pin_policy::override_policy(
+                pal,
+                io,
+                hdr,
+                decoder,
+                selector.request_field_count,
+                request_len,
+            )
+            .await
+        }
+        #[cfg(feature = "tsra_test_hooks")]
+        SupportedTestAction::PinPolicyClear => {
+            pin_policy::clear_policy(
+                pal,
+                io,
+                hdr,
+                decoder,
+                selector.request_field_count,
+                request_len,
+            )
+            .await
+        }
         #[cfg(feature = "tsra_test_hooks")]
         SupportedTestAction::ClearUserCredentials => {
             clear_user_credentials::dispatch(

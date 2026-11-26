@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 #![no_std]
 #![allow(unsafe_code)]
-//! TCON driver — cross-core crash-notification via wakeup timer 1.
+//! TCON driver — timestamp counter and cross-core crash notification.
 //!
 //! Implements the wakeup1 control path used by crash recovery. On a fatal fault the
 //! faulting core calls [`Tcon::fire_wakeup_timer1`], which arms wakeup1 as
@@ -13,8 +13,8 @@
 //! Each `WAKEUP_CTRL` field is 2 bits wide — bit `[0]` is wakeup0, bit
 //! `[1]` is wakeup1 — so every write is a read-modify-write that preserves
 //! the wakeup0 bit, exactly as the reference driver does. The reference
-//! TSC (`timer_lo`/`timer_hi`) and wakeup0 periodic tick are not ported:
-//! uno keeps time via SysTick / Embassy.
+//! TSC supplies persistent PIN-policy deadlines. The wakeup0 periodic tick
+//! is not ported: uno schedules via SysTick / Embassy.
 
 use tock_registers::interfaces::ReadWriteable;
 use tock_registers::interfaces::Readable;
@@ -43,6 +43,24 @@ const WAKEUP1_BIT: u32 = 0b10;
 pub struct Tcon;
 
 impl Tcon {
+    /// Timestamp-counter frequency in Hz, matching the reference firmware.
+    pub const fn tsc_freq_hz() -> u32 {
+        62_500_000
+    }
+
+    /// Read the global timestamp counter without changing timer configuration.
+    pub fn tsc() -> u64 {
+        let hi = REGS.timer_hi.get();
+        let lo = REGS.timer_lo.get();
+        Self::stitch_counter(lo, hi)
+    }
+
+    fn stitch_counter(lo: u32, hi: u32) -> u64 {
+        // Counter bit 31 appears in both registers; low is sampled after high.
+        let hi_add = u32::from((hi & 1) != (lo >> 31));
+        (u64::from(hi.wrapping_add(hi_add)) << 31) | u64::from(lo)
+    }
+
     /// Disable the wakeup1 timer if it is currently armed.
     ///
     /// Clears `WAKEUP_CTRL.WAKEUP_ENABLE[1]` while preserving the wakeup0
@@ -78,5 +96,23 @@ impl Tcon {
         let enable = REGS.wakeup_ctrl.read(WAKEUP_CTRL::WAKEUP_ENABLE);
         REGS.wakeup_ctrl
             .modify(WAKEUP_CTRL::WAKEUP_ENABLE.val(enable | WAKEUP1_BIT));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Tcon;
+
+    #[test]
+    fn stitches_overlapping_samples_and_corrects_rollover() {
+        for (lo, hi, expected) in [
+            (0x8000_0001, 0x0000_0001, 0x8000_0001),
+            (0x8007_8771, 0xffff_fff1, 0x7fff_fff8_8007_8771),
+            (0x8000_0000, 0, 0x8000_0000),
+            (0, 1, 0x1_0000_0000),
+            (0, u32::MAX, 0),
+        ] {
+            assert_eq!(Tcon::stitch_counter(lo, hi), expected);
+        }
     }
 }

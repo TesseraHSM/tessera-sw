@@ -4,13 +4,23 @@
 
 //! Register definitions for tcon.
 //!
-//! 'Global timestamp counter + two wakeup timers. uno models only the wakeup1 control path (WAKEUP_CTRL + WAKEUP1_CNT) used to raise `tcon_wakeup1_irq` (NVIC 89) for cross-core crash notification. TSC and wakeup0 are not modeled.  Base address: 0xB000_5000.  Driver uses: WAKEUP_CTRL.WKINTR_LEVEL_EN — wakeup1 level output WAKEUP_CTRL.WKINTR_RPT_EN   — wakeup1 one-shot WAKEUP_CTRL.WAKEUP_ENABLE   — arm/disarm wakeup1 WAKEUP1_CNT                 — fire count'
+//! 'Global timestamp counter + two wakeup timers. uno models the timestamp counter and wakeup1 control path used to raise `tcon_wakeup1_irq` (NVIC 89) for cross-core crash notification. Wakeup0 is not modeled.  Base address: 0xB000_5000.  Driver uses: WAKEUP_CTRL.WKINTR_LEVEL_EN — wakeup1 level output WAKEUP_CTRL.WKINTR_RPT_EN   — wakeup1 one-shot WAKEUP_CTRL.WAKEUP_ENABLE   — arm/disarm wakeup1 WAKEUP1_CNT                 — fire count'
 
 pub const TCON_BASE: u32 = 0xB0005000;
+pub const TIMER_LO_OFFSET: u32 = 0x00;
+pub const TIMER_HI_OFFSET: u32 = 0x04;
 pub const WAKEUP_CTRL_OFFSET: u32 = 0x10;
 pub const WAKEUP1_CNT_OFFSET: u32 = 0x18;
 
 tock_registers::register_bitfields! [u32,
+    /// 'Read-only timestamp counter slice. TIMER_HI bit 0 overlaps TIMER_LO bit 31; read high before low and correct for rollover.'
+    pub TIMER_LO [
+        VALUE OFFSET(0) NUMBITS(32) [],
+    ],
+    /// 'Read-only timestamp counter slice. TIMER_HI bit 0 overlaps TIMER_LO bit 31; read high before low and correct for rollover.'
+    pub TIMER_HI [
+        VALUE OFFSET(0) NUMBITS(32) [],
+    ],
     /// 'Control register for the two wakeup counters. Each field is 2 bits — bit [0] selects wakeup0, bit [1] selects wakeup1 — so writes must preserve the unrelated timer's bit.'
     pub WAKEUP_CTRL [
         /// 'Enable the wakeup counters. [0] enables wakeup0, [1] enables wakeup1. Setting a bit starts that counter counting down from its reload value.'
@@ -34,7 +44,9 @@ pub mod regs {
     //! MMIO register struct for firmware use.
     tock_registers::register_structs! {
         pub TconRegs {
-            (0x0 => _reserved0),
+            (0x0 => pub timer_lo: crate::RO<u32, super::TIMER_LO::Register>),
+            (0x4 => pub timer_hi: crate::RO<u32, super::TIMER_HI::Register>),
+            (0x8 => _reserved0),
             (0x10 => pub wakeup_ctrl: crate::RW<u32, super::WAKEUP_CTRL::Register>),
             (0x14 => _reserved1),
             (0x18 => pub wakeup1_cnt: crate::RW<u32, super::WAKEUP1_CNT::Register>),

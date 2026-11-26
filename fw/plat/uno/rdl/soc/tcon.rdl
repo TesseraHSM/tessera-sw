@@ -7,19 +7,18 @@
 // timers whose expiry raises `tcon_wakeup2_intr_o[0]` (wakeup0) and
 // `tcon_wakeup2_intr_o[1]` (wakeup1) on the NVIC.
 //
-// uno models ONLY the wakeup1 control path used for cross-core crash
+// uno models the timestamp counter and the wakeup1 control path used for cross-core crash
 // notification: on a fatal fault the faulting core arms wakeup1 as a
 // one-shot level interrupt so the peer core takes `tcon_wakeup1_irq`
-// (NVIC 89) and collects its own crash dump. The TSC (timer_lo/hi) and
-// wakeup0 (periodic system tick in the reference) are intentionally NOT
-// modeled — uno keeps time via SysTick / Embassy.
+// (NVIC 89) and collects its own crash dump. The TSC supplies persistent
+// PIN-policy deadlines. Wakeup0 is not modeled; scheduling uses SysTick / Embassy.
 //
 // Base address: 0xB000_5000  (block window 0x1000; matches reference
 //               `mcr-registers` TCON block, immediately below INTC).
 //
 // Internal layout (reference offsets):
-//   TIMER_LO      @ 0x00  (RO — TSC low,  not modeled)
-//   TIMER_HI      @ 0x04  (RO — TSC high, not modeled)
+//   TIMER_LO      @ 0x00  (RO — TSC bits 31:0)
+//   TIMER_HI      @ 0x04  (RO — TSC bits 62:31)
 //   WAKEUP_CTRL   @ 0x10
 //   WAKEUP0_CNT   @ 0x14  (not modeled)
 //   WAKEUP1_CNT   @ 0x18
@@ -30,6 +29,12 @@
 //   WAKEUP1_CNT                    = 1   // fire on next tick
 //   WAKEUP_CTRL.WAKEUP_ENABLE[1]   = 1   // enable wakeup1
 
+
+reg tcon_timer_t {
+    desc = "Read-only timestamp counter slice. TIMER_HI bit 0 overlaps
+            TIMER_LO bit 31; read high before low and correct for rollover.";
+    field { sw = r; hw = w; } VALUE[31:0];
+};
 
 // ── WAKEUP_CTRL — enable / interrupt-shape control for both wakeup timers ──
 
@@ -82,10 +87,10 @@ reg tcon_wakeup1_cnt_t {                                    // TCON: wakeup1_cnt
 
 addrmap tcon {
     name = "Timer Controller";
-    desc = "Global timestamp counter + two wakeup timers. uno models only
-            the wakeup1 control path (WAKEUP_CTRL + WAKEUP1_CNT) used to
+    desc = "Global timestamp counter + two wakeup timers. uno models the
+            timestamp counter and wakeup1 control path used to
             raise `tcon_wakeup1_irq` (NVIC 89) for cross-core crash
-            notification. TSC and wakeup0 are not modeled.
+            notification. Wakeup0 is not modeled.
 
             Base address: 0xB000_5000.
 
@@ -98,6 +103,8 @@ addrmap tcon {
     default hw = na;
     default sw = rw;
 
+    tcon_timer_t        TIMER_LO @ 0x00;
+    tcon_timer_t        TIMER_HI @ 0x04;
     tcon_wakeup_ctrl_t  WAKEUP_CTRL @ 0x10;
     tcon_wakeup1_cnt_t  WAKEUP1_CNT @ 0x18;
 };

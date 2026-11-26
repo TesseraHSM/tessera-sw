@@ -815,6 +815,14 @@ impl UnoHsmPal {
 }
 
 impl HsmPartitionManager for UnoHsmPal {
+    fn part_check_pin_policy(&self, io: &UnoHsmIo) -> HsmResult<()> {
+        self.check_pin_policy(io)
+    }
+
+    fn part_record_pin_auth(&self, io: &UnoHsmIo, valid: bool) -> HsmResult<()> {
+        self.record_pin_auth(io, valid)
+    }
+
     fn part_prop_get_u8(&self, io: &UnoHsmIo, id: HsmPartPropId) -> HsmResult<u8> {
         let part = PartStore::partition(io.pid())?;
         match id {

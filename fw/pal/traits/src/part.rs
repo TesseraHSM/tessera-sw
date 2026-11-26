@@ -227,6 +227,23 @@ impl HsmPartState {
 ///
 /// Partition scoping is implicit via the platform's private IO metadata.
 pub trait HsmPartitionManager: HsmIoTypes {
+    /// Check platform PIN-policy admission before MBOR credential processing.
+    ///
+    /// The caller holds the partition lock. Platforms without a PIN policy
+    /// retain the default unrestricted behavior.
+    fn part_check_pin_policy(&self, _io: &Self::Io) -> HsmResult<()> {
+        Ok(())
+    }
+
+    /// Notify the platform of an MBOR credential-comparison result.
+    ///
+    /// Called under the partition lock, only for a valid credential or an
+    /// authentication mismatch, before session derivation/allocation. Policy
+    /// accounting is not rolled back if the enclosing command later fails.
+    fn part_record_pin_auth(&self, _io: &Self::Io, _valid: bool) -> HsmResult<()> {
+        Ok(())
+    }
+
     /// Read a [`HsmPartPropKind::U8`] slot.
     ///
     /// # Parameters

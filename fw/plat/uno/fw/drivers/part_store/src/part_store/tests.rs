@@ -24,6 +24,30 @@ fn partition_lookup_rejects_wide_ids_without_aliasing() {
     }
 }
 
+#[test]
+fn pin_policy_is_partition_local_and_cleared_on_tenant_reset() {
+    let first = Partition(31);
+    let second = Partition(32);
+    first.reset();
+    second.reset();
+    let policy = PinPolicy {
+        state: PinPolicyState::Lockout,
+        delay_factor: 8,
+        allowed_attempts: 999,
+        lockout_time: 12345u64.to_le_bytes(),
+    };
+    for kind in [PartResetKind::Disable, PartResetKind::Migrate] {
+        first.set_pin_policy(policy);
+        assert_eq!(Partition(31).pin_policy(), policy);
+        assert_eq!(second.pin_policy(), PinPolicy::default());
+        first.clear_state(kind);
+        assert_eq!(first.pin_policy(), PinPolicy::default());
+    }
+    first.set_pin_policy(policy);
+    first.reset();
+    assert_eq!(first.pin_policy(), PinPolicy::default());
+}
+
 /// Views a fixed-length test pattern as a `&HsmDmaBuf` for the setters.
 fn buf(bytes: &[u8]) -> &HsmDmaBuf {
     // SAFETY: `HsmDmaBuf::from_raw` requires `bytes` to lie in a DMA-addressable

@@ -549,6 +549,9 @@ pub struct UnoHsmPal {
     /// consistency test, so only one IO tests a partition's slot at a time.
     /// See [`crate::unwrapping_key`].
     pub(crate) unwrap_pct_busy: [Cell<bool>; NUM_PARTITIONS],
+    /// Test-only delay-step overrides; deliberately not retained across boot.
+    #[cfg(feature = "tsra_test_hooks")]
+    pub(crate) pin_delay_increment: [Cell<Option<u16>>; NUM_PARTITIONS],
 }
 
 // SAFETY: UnoHsmPal is only accessed from a single-threaded Embassy
@@ -791,6 +794,8 @@ impl Default for UnoHsmPal {
             io_paused: Cell::new(false),
             io_dispatch: Cell::new(None),
             unwrap_pct_busy: [const { Cell::new(false) }; NUM_PARTITIONS],
+            #[cfg(feature = "tsra_test_hooks")]
+            pin_delay_increment: [const { Cell::new(None) }; NUM_PARTITIONS],
         }
     }
 }
