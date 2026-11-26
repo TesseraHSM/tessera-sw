@@ -12,6 +12,7 @@ use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIoController;
+use tsra_fw_hsm_pal_traits::HsmIoTypes;
 use tsra_fw_hsm_pal_traits::HsmPartPropId;
 use tsra_fw_hsm_pal_traits::HsmPartitionManager;
 use tsra_fw_hsm_pal_traits::HsmVault;
@@ -144,4 +145,64 @@ async fn check_public_keys() {
         part_state::part_pta_pub_key(&pal, &io, public).await,
         Err(HsmError::KeyNotFound)
     );
+}
+
+#[test]
+fn identity_survives_disable_enable_and_changes_on_nssr() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(check_identity_lifecycle());
+        })
+        .expect("test thread")
+        .join()
+        .expect("test result");
+}
+
+/// The partition ID and identity public key.
+async fn identity(pal: &StdHsmPal, io: &<StdHsmPal as HsmIoTypes>::Io) -> (Vec<u8>, Vec<u8>) {
+    let id = part_state::part_id(pal, io).expect("partition ID").to_vec();
+    let public = pal.dma_alloc(io, 96).expect("public key buffer");
+    part_state::part_id_pub_key(pal, io, public)
+        .await
+        .expect("identity public key");
+    (id, public.to_vec())
+}
+
+async fn check_identity_lifecycle() {
+    let (tx, rx) = async_channel::bounded(1);
+    let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+    pal.part_alloc_internal(0, 1).await.expect("partition");
+    pal.part_enable_internal(0).await.expect("enable");
+    let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(HsmIoRequest::cmd(
+        HsmPartId::from(0u8),
+        0,
+        0,
+        [0; 16],
+        reply_tx,
+    ))
+    .await
+    .expect("IO request");
+    let io = pal.poll_io().await.expect("poll IO");
+    let first = identity(&pal, &io).await;
+
+    // Disable wipes the vault; enable must re-import the kept identity.
+    pal.part_disable_internal(0).expect("disable");
+    pal.part_enable_internal(0).await.expect("re-enable");
+    assert_eq!(
+        identity(&pal, &io).await,
+        first,
+        "disable/enable must keep the identity"
+    );
+
+    // NSSR presents a fresh identity.
+    pal.part_migrate_internal(0).await.expect("NSSR");
+    let migrated = identity(&pal, &io).await;
+    assert_ne!(migrated.0, first.0, "NSSR must change the partition ID");
+    assert_ne!(migrated.1, first.1, "NSSR must change the identity key");
 }

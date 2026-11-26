@@ -148,6 +148,7 @@ const STD_VM_LAUNCH_GUID: [u8; VM_LAUNCH_GUID_LEN] = [
 /// | `res_mask` | 16 B | Resource bitmask (each bit = one vault table) |
 /// | `id` | 16 B | Random identity blob |
 /// | `id_key_id` | vault handle | Identity private key; public point derived on demand |
+/// | `id_priv` | 48 B | Kept identity private key, re-imported after disable |
 /// | `leaf_cert` | 2 KB | Cached DER-encoded partition leaf certificate |
 /// | `session_table` | 2 B | Bitmask session allocator |
 ///
@@ -182,6 +183,12 @@ pub(crate) struct PartitionEntry {
 
     /// Vault key ID for the partition's identity ECC-384 private key.
     pub(crate) id_key_id: Option<HsmKeyId>,
+
+    /// The identity private key, standing in for the partition-store slot
+    /// that holds it on Uno: kept across disable, which wipes the vault, so
+    /// the next enable re-imports the same identity.  Zeroized when dropped,
+    /// on NSSR and free.
+    id_priv: Option<Zeroizing<Vec<u8>>>,
 
     /// Cached DER-encoded partition leaf certificate (lazily generated).
     pub(crate) leaf_cert: [u8; MAX_CERT_DER_LEN],
@@ -332,6 +339,7 @@ impl Default for PartitionEntry {
             res_mask: 0,
             id: [0u8; PART_ID_LEN],
             id_key_id: None,
+            id_priv: None,
             leaf_cert: [0u8; MAX_CERT_DER_LEN],
             leaf_cert_len: 0,
             session_table: SessionTable::new(),
@@ -773,6 +781,7 @@ impl StdHsmPal {
             entry.res_mask = 0;
             entry.vault = KeyVault::new(0);
             entry.id_key_id = None;
+            entry.id_priv = None;
             return Err(e);
         }
 
@@ -843,8 +852,9 @@ impl StdHsmPal {
     }
 
     /// Generate partition `pid`'s enable-time key material: its identity
-    /// key, if a reset wiped it, the establish-credential and
-    /// session-encryption ECC-384 key pairs, and a fresh nonce.
+    /// key, if a reset wiped it (re-imported when kept), the
+    /// establish-credential and session-encryption ECC-384 key pairs, and a
+    /// fresh nonce.
     async fn provision_enabled_keys(&self, pid: u8) -> HsmResult<()> {
         let table = self.table_mut();
         let idx = pid as usize;
@@ -853,19 +863,24 @@ impl StdHsmPal {
             .with_local(true)
             .with_derive(true);
 
-        // If the identity key was wiped (e.g., by a prior part_disable),
-        // regenerate it before any other key — mirrors real hardware
-        // where NSSR/erase always provisions a fresh partition identity
-        // key.  Must be created first so it lands in the same vault
-        // slot the `id_key_id` field was originally bound to.
+        // If the vault copy of the identity key is gone (a prior disable or
+        // NSSR wiped the vault), restore it before any other key: re-import
+        // the kept key, as the Uno PAL does, so disable/enable keeps the
+        // partition identity; generate a new one only when none is kept
+        // (NSSR clears it).
         if table.entries[idx].id_key_id.is_none() {
             let id_attrs = HsmVaultKeyAttrs::new()
                 .with_internal(true)
                 .with_local(true)
                 .with_sign(true);
-            let mut id_pub = [0u8; P384_PUB_KEY_LEN];
-            let id_kid = self
-                .create_internal_ecc384_key(
+            let entry = &mut table.entries[idx];
+            let id_kid = if let Some(id_priv) = &entry.id_priv {
+                entry
+                    .vault
+                    .create(id_priv, HsmVaultKeyKind::Ecc384Private, None, id_attrs)?
+            } else {
+                let mut id_pub = [0u8; P384_PUB_KEY_LEN];
+                self.create_internal_ecc384_key(
                     pid,
                     HsmVaultKeyKind::Ecc384Private,
                     id_attrs,
@@ -873,11 +888,12 @@ impl StdHsmPal {
                     EccForm::BE,
                     &mut id_pub,
                 )
-                .await?;
+                .await?
+            };
             let table = self.table_mut();
             let entry = &mut table.entries[idx];
             entry.id_key_id = Some(id_kid);
-            // Rebuild the leaf certificate against the fresh identity key.
+            // Rebuild the leaf certificate against the restored identity key.
             entry.leaf_cert[..entry.leaf_cert_len].fill(0);
             entry.leaf_cert_len = 0;
         }
@@ -981,8 +997,9 @@ impl StdHsmPal {
         session_table.restore(survivors);
         entry.session_table = session_table;
         // A fresh identity, as on the Uno PAL: a new id blob here, and a new
-        // identity key below.
+        // identity key below (the kept one is dropped so it is not restored).
         Rng::rand_bytes(&mut entry.id).map_err(|_| HsmError::InternalError)?;
+        entry.id_priv = None;
         self.provision_enabled_keys(pid).await?;
         self.table_mut().entries[idx].state = HsmPartState::Enabled;
         Ok(())
@@ -1046,6 +1063,7 @@ impl StdHsmPal {
 
         // Zeroize identity material.
         entry.id.fill(0);
+        entry.id_priv = None;
         if let Some(kid) = entry.id_key_id.take() {
             let _ = entry.vault.delete(kid);
         }
@@ -1148,7 +1166,12 @@ impl StdHsmPal {
 
         let table = self.table_mut();
         let entry = &mut table.entries[pid as usize];
-        entry.vault.create(&key_blob, kind, None, attrs)
+        let kid = entry.vault.create(&key_blob, kind, None, attrs)?;
+        // Keep the identity key so a later enable can re-import it.
+        if matches!(kind, HsmVaultKeyKind::Ecc384Private) {
+            entry.id_priv = Some(key_blob);
+        }
+        Ok(kid)
     }
 
     /// Clear all state associated with an enabled partition: its per-tenant
@@ -1188,8 +1211,8 @@ impl StdHsmPal {
     fn clear_tenant_state(entry: &mut PartitionEntry) {
         // Vault-backed keys whose ids live in this entry.  `id_key_id`
         // is taken (rather than vault-deleted) so `provision_enabled_keys`
-        // knows to regenerate the identity key; the vault itself is
-        // cleared wholesale below.
+        // knows to restore the identity key (from `id_priv`, kept here);
+        // the vault itself is cleared wholesale below.
         drop_key(&mut entry.vault, &mut entry.establish_cred_key_id);
         drop_key(&mut entry.vault, &mut entry.session_enc_key_id);
         drop_key(&mut entry.vault, &mut entry.mk_key_id);
