@@ -24,6 +24,7 @@ const CARGO_FUZZ_VERSION: &str = "0.13.1";
 const CARGO_CBINDGEN_VERSION: &str = "0.29.2";
 const CARGO_AUDIT_VERSION: &str = "0.22.0";
 const CARGO_LLVM_COV_VERSION: &str = "0.6.23";
+const NIGHTLY_TOOLCHAIN: &str = "nightly-2026-11-17";
 
 /// Xtask to run various repo-specific checks
 #[derive(Parser)]
@@ -51,6 +52,16 @@ impl Xtask for Setup {
         log::trace!("running setup");
 
         let sh = Shell::new()?;
+        let toolchain = format!("+{NIGHTLY_TOOLCHAIN}");
+
+        // Add required firmware cross-compilation targets.
+        {
+            let tgt = "thumbv7em-none-eabi";
+            cmd!(sh, "rustup target add {tgt}").quiet().run()?;
+            cmd!(sh, "rustup {toolchain} target add {tgt}")
+                .quiet()
+                .run()?;
+        }
 
         // Run Install Cargo nextest
         let install_cargo_nextest = install::Install {
@@ -160,6 +171,40 @@ impl Xtask for Setup {
         if add_fmt.run(ctx.clone()).is_ok() {
             // Check Fmt version
             let _ = cmd!(sh, "cargo +nightly fmt --version").quiet().run();
+        }
+
+        // Add Clippy (firmware nightly)
+        let add_clippy = rustup_component_add::RustupComponentAdd {
+            component: "clippy".to_string(),
+            toolchain: Some(NIGHTLY_TOOLCHAIN.to_string()),
+        };
+        // ignore failure in adding Clippy (firmware nightly)
+        if add_clippy.run(ctx.clone()).is_ok() {
+            // Check Clippy (firmware nightly) version
+            let _ = cmd!(sh, "cargo {toolchain} clippy --version").quiet().run();
+        }
+
+        // Add Fmt (firmware nightly)
+        let add_fmt = rustup_component_add::RustupComponentAdd {
+            component: "rustfmt".to_string(),
+            toolchain: Some(NIGHTLY_TOOLCHAIN.to_string()),
+        };
+        // ignore failure in adding Fmt (firmware nightly)
+        if add_fmt.run(ctx.clone()).is_ok() {
+            // Check Fmt (firmware nightly) version
+            let _ = cmd!(sh, "cargo {toolchain} fmt --version").quiet().run();
+        }
+
+        // Add rust-src (firmware nightly)
+        let add_rust_src = rustup_component_add::RustupComponentAdd {
+            component: "rust-src".to_string(),
+            toolchain: Some(NIGHTLY_TOOLCHAIN.to_string()),
+        };
+        // ignore failure in adding rust-src (firmware nightly)
+        if add_rust_src.run(ctx.clone()).is_ok() {
+            let _ = cmd!(sh, "rustup {toolchain} component list --installed")
+                .quiet()
+                .run();
         }
 
         // Verify OpenSSL is discoverable (Linux only).
