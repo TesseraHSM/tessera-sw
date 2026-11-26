@@ -28,11 +28,13 @@
 //! | `HostSgl::write_from`    | Device              | Host (raw SGL, cursor)|
 //! | `HostSgl::write_zeros`   | Zero window         | Host (raw SGL, cursor)|
 
+use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaAddr;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_uno_drivers_gdma::GdmaAddr;
 use tsra_fw_uno_drivers_gdma::GdmaBuf;
 use tsra_fw_uno_drivers_gdma::MemInterface;
@@ -317,13 +319,14 @@ impl HostSgl {
 
     /// Reads the next Data Block descriptor from host memory into the
     /// cursor, following at most one segment chain per non-last
-    /// segment. `scratch` must be at least 16 bytes.
+    /// segment, and returns the block's full length. `scratch` must be
+    /// at least 16 bytes.
     async fn next_block(
         &mut self,
         pal: &UnoHsmPal,
         io: &crate::UnoHsmIo,
         scratch: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+    ) -> HsmResult<u32> {
         let ifc = host_interface(io.pid())?;
         loop {
             if self.seg_rem == 0 {
@@ -358,7 +361,7 @@ impl HostSgl {
                     }
                     self.blk_addr = sgl_desc_addr(&d);
                     self.blk_rem = core::cmp::min(len as usize, self.remaining) as u32;
-                    return Ok(());
+                    return Ok(len);
                 }
                 ty @ (SGL_TYPE_SEGMENT | SGL_TYPE_LAST_SEGMENT) => {
                     // A chain pointer is only legal as the final entry
@@ -514,6 +517,36 @@ impl HostSgl {
         self.remaining -= n;
         Ok(())
     }
+
+    /// Walks the whole list without moving any payload and checks that
+    /// it holds exactly the cursor's `total` bytes. `scratch` (≥ 16
+    /// bytes) holds fetched descriptors.
+    ///
+    /// # Errors
+    /// * [`HsmError::InvalidArg`] if the list is malformed or holds more
+    ///   or fewer than `total` bytes.
+    /// * Any GDMA error reading the list.
+    async fn expect_exact_len(
+        mut self,
+        pal: &UnoHsmPal,
+        io: &crate::UnoHsmIo,
+        scratch: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        while self.remaining != 0 {
+            if self.blk_rem == 0
+                && self.next_block(pal, io, scratch).await? as usize > self.remaining
+            {
+                return Err(HsmError::InvalidArg);
+            }
+            self.remaining -= self.blk_rem as usize;
+            self.blk_rem = 0;
+        }
+        // Descriptors left over describe bytes beyond `total`.
+        if self.seg_rem != 0 || !self.seg_last {
+            return Err(HsmError::InvalidArg);
+        }
+        Ok(())
+    }
 }
 
 /// Uno platform implementation of [`HsmGdmaController`].
@@ -640,6 +673,35 @@ impl HsmGdmaController for UnoHsmPal {
 }
 
 impl UnoHsmPal {
+    /// Checks that the host buffer named by the raw SGL descriptor `desc`
+    /// holds exactly `len` payload bytes.
+    ///
+    /// [`raw_sgl_len`] checks a Data Block's length, but a `SEGMENT` /
+    /// `LAST_SEGMENT` length counts descriptor bytes, so a payload of the
+    /// wrong size would otherwise fail mid-transfer as a GDMA error
+    /// rather than as `InvalidArg`. Walks such a list with [`HostSgl`].
+    ///
+    /// # Errors
+    /// * [`HsmError::InvalidArg`] if `desc` is malformed or its buffer
+    ///   holds more or fewer than `len` bytes.
+    /// * Any GDMA error reading the list.
+    pub(crate) async fn check_host_sgl_len(
+        &self,
+        io: &crate::UnoHsmIo,
+        desc: &[u8; 16],
+        len: usize,
+    ) -> HsmResult<()> {
+        let sgl = HostSgl::new(desc, len)?;
+        if sgl_desc_type(desc) == SGL_TYPE_DATA_BLOCK {
+            return Ok(());
+        }
+        self.alloc_scoped_async(io, async |scope| {
+            let scratch = scope.dma_alloc(SGL_DESC_LEN as usize)?;
+            sgl.expect_exact_len(self, io, scratch).await
+        })
+        .await
+    }
+
     /// Copy `src` to the start of the host buffer named by the raw SGL
     /// descriptor `desc`, which must describe at least `src.len()` bytes.
     /// The GDMA does not honor an SGL as a host destination, so this walks

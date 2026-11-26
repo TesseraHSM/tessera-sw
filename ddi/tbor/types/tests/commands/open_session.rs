@@ -38,10 +38,13 @@ fn session_reopen_rejects_another_slots_valid_recovery_material() {
         .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("first init");
     let first = ctx.session_open_finish(first).expect("first finish");
-    let other = ctx
+    // The driver allows one session per handle (`TSRA_MAX_SESSIONS_PER_FD =
+    // 1`), so the other slot's session lives on its own handle.
+    let other_ctx = TestCtx::new_with_path(ctx.path());
+    let other = other_ctx
         .session_open_init(CU, SessionSuite::EcdhP384)
         .expect("other init");
-    let other = ctx.session_open_finish(other).expect("other finish");
+    let other = other_ctx.session_open_finish(other).expect("other finish");
     ctx.erase().expect("migration");
     let opts = || SessionOpenInitOptions::new(CU, first.suite).for_reopen(first.session_id);
     let pending = ctx
@@ -65,10 +68,11 @@ fn session_reopen_rejects_another_slots_valid_recovery_material() {
         .expect("correct lineage succeeds");
     ctx.session_close(first.session_id)
         .expect("close recovered");
-    ctx.tbor(&tsra_ddi_tbor_types::TborSessionClosePlainReq {
-        session_id: other.session_id,
-    })
-    .expect("close stale peer");
+    other_ctx
+        .tbor(&tsra_ddi_tbor_types::TborSessionClosePlainReq {
+            session_id: other.session_id,
+        })
+        .expect("close stale peer");
 }
 
 #[test]
