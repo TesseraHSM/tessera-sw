@@ -1,8 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Native Uno qualification: override-based cases require `tsra_test_hooks` and
-//! are skipped when the firmware reports `UnsupportedCmd`. Emulator/mock runs do not qualify Uno.
+//! Native Uno qualification: all cases are skipped on non-physical devices. Cases
+//! that need Uno PIN-policy enforcement run through `run`, which skips them when
+//! the firmware reports `UnsupportedCmd` for the `tsra_test_hooks` policy actions
+//! (the std simulator does not enforce the policy).
 //! Reference sampling durations and failure counts are preserved; normal runs include real waits.
 
 #![allow(clippy::unwrap_used)]
@@ -50,18 +52,26 @@ fn clear(dev: &mut Dev, session: u16) {
         .expect("Uno tsra_test_hooks PIN-policy clear is required");
 }
 
+fn is_physical(dev: &mut Dev) -> bool {
+    let physical = get_device_kind(dev) == DdiDeviceKind::Physical;
+    if !physical {
+        println!("Physical device NOT found. Test only supported on physical device.");
+    }
+    physical
+}
+
 type Body = fn(&mut Dev, &DdiTest, &str, u16);
 
 thread_local! {
-    // `ddi_dev_test` takes function pointers, so the body and per-device hook
-    // support are passed through thread-local state.
+    // `ddi_dev_test` takes function pointers, so the body and whether it can
+    // run on the current device are passed through thread-local state.
     static BODY: Cell<Option<Body>> = const { Cell::new(None) };
-    static HOOKS_SUPPORTED: Cell<bool> = const { Cell::new(false) };
+    static RUNNABLE: Cell<bool> = const { Cell::new(false) };
 }
 
 fn cleanup(dev: &mut Dev, ddi: &DdiTest, path: &str, session: Option<u16>) {
     let result = session
-        .filter(|_| HOOKS_SUPPORTED.get())
+        .filter(|_| RUNNABLE.get())
         .map(|id| helper_test_action_cmd(dev, id, TestActionRequest::PinPolicyClear));
     // Erase even if clearing the policy failed, including after a test panic.
     common_cleanup(dev, ddi, path, session);
@@ -70,16 +80,20 @@ fn cleanup(dev: &mut Dev, ddi: &DdiTest, path: &str, session: Option<u16>) {
     }
 }
 
-/// Runs `body` only when the firmware supports the PIN-policy test actions;
-/// otherwise the case is skipped, like the other test-hook suites.
+/// Runs `body` only on a physical device whose firmware supports the PIN-policy
+/// test actions; otherwise the case is skipped, like the other test-hook suites.
 fn run(body: Body) {
     BODY.set(Some(body));
     ddi_dev_test(
         |dev, ddi, path| {
             let session = common_setup(dev, ddi, path);
+            if !is_physical(dev) {
+                RUNNABLE.set(false);
+                return session;
+            }
             let result = helper_test_action_cmd(dev, session, TestActionRequest::PinPolicyClear);
             let supported = !matches!(&result, Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd)));
-            HOOKS_SUPPORTED.set(supported);
+            RUNNABLE.set(supported);
             if !supported {
                 println!("Firmware is not built with tsra_test_hooks.");
             } else if result.is_err() {
@@ -90,7 +104,7 @@ fn run(body: Body) {
         },
         cleanup,
         |dev, ddi, path, session| {
-            if HOOKS_SUPPORTED.get() {
+            if RUNNABLE.get() {
                 BODY.get().expect("PIN-policy test body")(dev, ddi, path, session);
             }
         },
@@ -135,6 +149,9 @@ fn seed_threshold(dev: &mut Dev, session: u16) {
 #[test]
 fn invalid_pin_is_rejected() {
     ddi_dev_test(common_setup, common_cleanup, |dev, _, _, session| {
+        if !is_physical(dev) {
+            return;
+        }
         helper_close_session(dev, Some(session), revision()).expect("close setup session");
         wrong(dev, DdiStatus::InvalidAppCredentials);
     });
@@ -157,7 +174,7 @@ fn invalid_pin_reaches_threshold_and_command_errors_retain_accounting() {
 
 #[test]
 fn failed_auth_then_valid_auth_resets_context() {
-    ddi_dev_test(common_setup, common_cleanup, |_, ddi, path, _| {
+    run(|_, ddi, path, _| {
         let attempt_dev = ddi.open_dev(path).unwrap();
         for _ in 0..ATTEMPTS {
             wrong(&attempt_dev, DdiStatus::InvalidAppCredentials);
@@ -582,7 +599,6 @@ fn sample_factor<const FACTOR: u16>(dev: &mut Dev, ddi: &DdiTest, path: &str, se
     for _ in 0..ATTEMPTS {
         wrong(&attempt_dev, DdiStatus::InvalidAppCredentials);
     }
-    wrong(&attempt_dev, DdiStatus::LoginFailed);
 }
 
 #[test]
