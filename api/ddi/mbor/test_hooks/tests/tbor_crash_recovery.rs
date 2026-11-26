@@ -1,16 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Crash-recovery integration test for a TBOR-provisioned partition.
+//! Crash-recovery integration tests for a TBOR partition.
 //!
-//! The test provisions the partition through TBOR (rotated CO session,
-//! `PartInit`, `PartFinal`), injects a crash with the test-hook
+//! Each test provisions the partition through TBOR to one lifecycle stage
+//! (`Enabled`, `Initializing` after `PartInit`, or `Initialized` after
+//! `PartFinal`), injects a crash with the test-hook
 //! [`DdiTestAction::TriggerCrash`](tsra_ddi_mbor_test_hooks::DdiTestAction),
-//! waits for the firmware and driver to recover, and then repeats the host
-//! provisioning flow to confirm the partition is usable again.
+//! waits for the firmware and driver to recover, and then checks the
+//! partition is `Enabled` with its identity kept and can be provisioned again.
 //!
 //! Behaviour on this firmware:
-//! - Requires a **physical** device; virtual devices are skipped.
+//! - Requires a **physical** device; the socket simulator and virtual devices
+//!   are skipped.
 //! - Requires firmware built with `tsra_test_hooks`; otherwise `TriggerCrash`
 //!   returns [`DdiStatus::UnsupportedCmd`] and the case is skipped.
 //! - The crash is sent as an MBOR `TestAction` on a TBOR CU session, through
@@ -24,6 +26,7 @@ mod common;
 
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
 use common::HardwareTestLock;
 use test_with_tracing::test;
@@ -49,14 +52,21 @@ use tsra_ddi_tbor_types::TborSessionClosePlainReq;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
 
-/// Seconds to wait for the firmware and driver to recover after a crash.
-const RECOVERY_WAIT_SECS: u64 = 10;
+/// Time to leave the driver alone after the crash, so no command is sent
+/// while its health monitor runs the Level-2 abort.
+const RECOVERY_SETTLE: Duration = Duration::from_secs(10);
+
+/// Upper bound on the whole recovery, generous for slow or busy hosts.
+const RECOVERY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `PartInfo` device kind reported by physical firmware.
 const DEVICE_KIND_PHYSICAL: u8 = 2;
 
 /// `HsmPartState::Enabled` wire discriminant.
 const PART_STATE_ENABLED: u8 = 2;
+
+/// `HsmPartState::Initializing` wire discriminant.
+const PART_STATE_INITIALIZING: u8 = 4;
 
 /// `HsmPartState::Initialized` wire discriminant.
 const PART_STATE_INITIALIZED: u8 = 5;
@@ -80,32 +90,82 @@ fn part_info(ctx: &TestCtx, context: &str) -> TborPartInfoResp {
         .unwrap_or_else(|e| panic!("{context}: PartInfo failed: {e:?}"))
 }
 
-/// Run `PartInit` then a first-instantiation `PartFinal` on `session`,
-/// leaving the partition `Initialized`.
+/// Lifecycle stage the partition is provisioned to before the crash.
+#[derive(Clone, Copy, Debug)]
+enum Stage {
+    /// No TBOR provisioning: `Enabled`.
+    Enabled,
+    /// `PartInit` only: `Initializing`.
+    PartInit,
+    /// `PartInit` and `PartFinal`: `Initialized`.
+    PartFinal,
+}
+
+/// Provision the partition to `stage` on the CO `session`, leaving it in the
+/// matching state.
 fn provision_partition(
     ctx: &TestCtx,
     session: &SessionHandshake,
     pota: &PotaFixture,
+    stage: Stage,
     context: &str,
 ) {
-    let policy = part_policy(pota);
-    let init = ctx
-        .part_init(session, &mach_seed(), &policy)
-        .unwrap_or_else(|e| panic!("{context}: PartInit failed: {e:?}"));
-    let chain = pota.chain_for(&pta_pub_from_csr(&init.pta_csr));
-    ctx.part_final(session, &policy, &[], &chain.der_items())
-        .unwrap_or_else(|e| panic!("{context}: PartFinal failed: {e:?}"));
+    let expected = match stage {
+        Stage::Enabled => PART_STATE_ENABLED,
+        Stage::PartInit | Stage::PartFinal => {
+            let policy = part_policy(pota);
+            let init = ctx
+                .part_init(session, &mach_seed(), &policy)
+                .unwrap_or_else(|e| panic!("{context}: PartInit failed: {e:?}"));
+            if let Stage::PartFinal = stage {
+                let chain = pota.chain_for(&pta_pub_from_csr(&init.pta_csr));
+                ctx.part_final(session, &policy, &[], &chain.der_items())
+                    .unwrap_or_else(|e| panic!("{context}: PartFinal failed: {e:?}"));
+                PART_STATE_INITIALIZED
+            } else {
+                PART_STATE_INITIALIZING
+            }
+        }
+    };
     assert_eq!(
         part_info(ctx, context).part_state,
-        PART_STATE_INITIALIZED,
-        "{context}: partition must be Initialized after PartFinal",
+        expected,
+        "{context}: unexpected partition state after provisioning to {stage:?}",
     );
 }
 
-/// Crash the Admin core on a TBOR-finalized partition, then confirm the
-/// host can provision the partition again and open CO and CU sessions.
-#[test]
-fn test_tbor_crash_recovery_hard_fault_admin() {
+/// Wait for the host's recovery (Disable then Enable) to finish.
+///
+/// Until it does, `PartInfo` fails: it derives the identity public key from
+/// the vault, which the crash erased, and only Enable re-imports the key.
+/// So a successful `PartInfo` reporting `Enabled` marks the end of recovery,
+/// even when the partition was already `Enabled` before the crash.
+fn wait_for_recovery(ctx: &TestCtx) -> TborPartInfoResp {
+    let start = Instant::now();
+    thread::sleep(RECOVERY_SETTLE);
+    loop {
+        let info = ctx.tbor(&TborPartInfoReq::new());
+        if let Ok(info) = &info {
+            if info.part_state == PART_STATE_ENABLED {
+                return *info;
+            }
+        }
+        assert!(
+            start.elapsed() < RECOVERY_TIMEOUT,
+            "partition not recovered after {RECOVERY_TIMEOUT:?}; last PartInfo: {info:?}",
+        );
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// Crash the Admin core with the partition provisioned to `stage`, then
+/// confirm it recovers to `Enabled` with the same identity, and that the host
+/// can provision it again and open CO and CU sessions.
+fn crash_and_recover(stage: Stage) {
+    if tsra_ddi::sock_selected() {
+        println!("Skipped TBOR crash test on the socket simulator.");
+        return;
+    }
     let _hardware_test_lock = HardwareTestLock::acquire();
     let ctx = TestCtx::new();
 
@@ -114,12 +174,12 @@ fn test_tbor_crash_recovery_hard_fault_admin() {
         return;
     }
 
-    // Provision through TBOR: rotated CO session, PartInit, PartFinal. The
-    // driver allows one open session per file handle, so close CO before
-    // opening the CU session used to inject the crash.
+    // Provision through TBOR with a rotated CO session. The driver allows one
+    // open session per file handle, so close CO before opening the CU session
+    // used to inject the crash.
     let pota = PotaFixture::generate();
     let co = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    provision_partition(&ctx, &co, &pota, "before crash");
+    provision_partition(&ctx, &co, &pota, stage, "before crash");
     let before = part_info(&ctx, "before crash");
     ctx.session_close(co.session_id)
         .unwrap_or_else(|e| panic!("before crash: CO session close failed: {e:?}"));
@@ -145,7 +205,17 @@ fn test_tbor_crash_recovery_hard_fault_admin() {
         "TriggerCrash unexpectedly succeeded: {resp:?}"
     );
 
-    thread::sleep(Duration::from_secs(RECOVERY_WAIT_SECS));
+    // The partition must be back to Enabled, ready to be provisioned again,
+    // with its identity kept.
+    let after = wait_for_recovery(&ctx);
+    assert_eq!(
+        after.pid, before.pid,
+        "after recovery: partition ID must be unchanged"
+    );
+    assert_eq!(
+        after.pid_pub_key, before.pid_pub_key,
+        "after recovery: partition identity key must be unchanged",
+    );
 
     // Recovery's Disable leaves the crashed CU slot renegotiating, which
     // keeps it reserved across NSSR; release it with the plaintext close
@@ -155,33 +225,36 @@ fn test_tbor_crash_recovery_hard_fault_admin() {
     })
     .unwrap_or_else(|e| panic!("after recovery: crashed CU session close failed: {e:?}"));
 
-    // After the host's recovery (Disable then Enable) the partition must be
-    // back to Enabled, ready to be provisioned again, with its identity kept.
-    let after = part_info(&ctx, "after recovery");
-    assert_eq!(
-        after.part_state, PART_STATE_ENABLED,
-        "after recovery: partition must be Enabled for re-provisioning",
-    );
-    assert_eq!(
-        after.pid, before.pid,
-        "after recovery: partition ID must be unchanged"
-    );
-    assert_eq!(
-        after.pid_pub_key, before.pid_pub_key,
-        "after recovery: partition identity key must be unchanged",
-    );
     ctx.cert_chain_info()
         .unwrap_or_else(|e| panic!("after recovery: GetCertChainInfo failed: {e:?}"));
 
-    // Repeat the host provisioning flow on the recovered partition. The
+    // Repeat the full host provisioning flow on the recovered partition. The
     // driver allows one open session per file handle, so close CO before
     // opening CU.
     let co = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
-    provision_partition(&ctx, &co, &pota, "after recovery");
+    provision_partition(&ctx, &co, &pota, Stage::PartFinal, "after recovery");
     ctx.session_close(co.session_id)
         .unwrap_or_else(|e| panic!("after recovery: CO session close failed: {e:?}"));
 
     let cu = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
     ctx.session_close(cu.session_id)
         .unwrap_or_else(|e| panic!("after recovery: CU session close failed: {e:?}"));
+}
+
+/// Crash on an `Enabled` partition (no TBOR provisioning).
+#[test]
+fn test_tbor_crash_recovery_hard_fault_admin_enabled() {
+    crash_and_recover(Stage::Enabled);
+}
+
+/// Crash on an `Initializing` partition (after `PartInit`).
+#[test]
+fn test_tbor_crash_recovery_hard_fault_admin_after_part_init() {
+    crash_and_recover(Stage::PartInit);
+}
+
+/// Crash on an `Initialized` partition (after `PartFinal`).
+#[test]
+fn test_tbor_crash_recovery_hard_fault_admin_after_part_final() {
+    crash_and_recover(Stage::PartFinal);
 }
