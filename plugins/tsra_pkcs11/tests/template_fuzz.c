@@ -15,6 +15,7 @@
  *   clang-18 -g -O1 -fsanitize=fuzzer,address,undefined -I ../include/pkcs11-v3.1 \
  *       -I ../src template_fuzz.c ../src/tsra_pkcs11_attr_types.c \
  *       ../src/tsra_pkcs11_attr_policy.c ../src/tsra_pkcs11_template.c \
+ *       ../src/tsra_pkcs11_ec_template.c \
  *       ../src/tsra_pkcs11_unwrap_params.c ../src/tsra_pkcs11_digest.c \
  *       -o template_fuzz && ./template_fuzz -max_total_time=60
  *
@@ -64,6 +65,8 @@ static const CK_ATTRIBUTE_TYPE TYPES[] = {
     CKA_WRAP,
     CKA_UNWRAP,
     CKA_SIGN,
+    CKA_EC_PARAMS,
+    CKA_EC_POINT,
 };
 
 #define TYPE_INDEX_MASK 0x7Fu

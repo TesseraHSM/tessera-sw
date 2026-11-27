@@ -7,6 +7,7 @@
  */
 
 #include "tsra_pkcs11_attr_policy.h"
+#include "tsra_pkcs11_ec_template.h"
 #include "tsra_pkcs11_template.h"
 
 #include <stddef.h>
@@ -398,6 +399,52 @@ CK_RV tsra_pkcs11_destroy_check(CK_BBOOL rw_session, tsra_pkcs11_attr_reader rea
     return object_gate(read, ctx, rw_session, CKA_DESTROYABLE);
 }
 
+/*
+ * A public key needs the attributes PKCS#11 v3.1 requires at C_CreateObject
+ * (footnote 1 of the common key, RSA and EC public key attribute tables): its
+ * key type; for an EC key the curve, one the token supports, and a point
+ * encoded for that curve; for an RSA key the modulus and exponent, neither
+ * empty. Public keys of other types are stored as given.
+ */
+static CK_RV public_key_check(const CK_ATTRIBUTE *tmpl, CK_ULONG count)
+{
+    CK_ULONG kt = 0;
+    const CK_ATTRIBUTE *type = tsra_pkcs11_tmpl_find(tmpl, count, CKA_KEY_TYPE);
+    if (type == NULL)
+    {
+        return CKR_TEMPLATE_INCOMPLETE;
+    }
+    CK_RV rv = tsra_pkcs11_tmpl_ulong(type, &kt);
+    if (rv != CKR_OK)
+    {
+        return rv;
+    }
+    if (kt == CKK_RSA)
+    {
+        const CK_ATTRIBUTE *n = tsra_pkcs11_tmpl_find(tmpl, count, CKA_MODULUS);
+        const CK_ATTRIBUTE *e = tsra_pkcs11_tmpl_find(tmpl, count, CKA_PUBLIC_EXPONENT);
+        if ((n == NULL) || (e == NULL))
+        {
+            return CKR_TEMPLATE_INCOMPLETE;
+        }
+        return ((n->ulValueLen > 0) && (e->ulValueLen > 0)) ? CKR_OK : CKR_ATTRIBUTE_VALUE_INVALID;
+    }
+    if (kt != CKK_EC)
+    {
+        return CKR_OK;
+    }
+    const CK_ATTRIBUTE *params = tsra_pkcs11_tmpl_find(tmpl, count, CKA_EC_PARAMS);
+    const CK_ATTRIBUTE *point = tsra_pkcs11_tmpl_find(tmpl, count, CKA_EC_POINT);
+    if ((params == NULL) || (point == NULL))
+    {
+        return CKR_TEMPLATE_INCOMPLETE;
+    }
+    tsra_pkcs11_ec_curve_t curve = TSRA_PKCS11_CURVE_NONE;
+    rv = tsra_pkcs11_ec_params_curve(params->pValue, params->ulValueLen, &curve);
+    return (rv == CKR_OK) ? tsra_pkcs11_ec_point_check(point->pValue, point->ulValueLen, curve)
+                          : rv;
+}
+
 CK_RV tsra_pkcs11_create_check(
     const CK_ATTRIBUTE *tmpl,
     CK_ULONG count,
@@ -470,5 +517,5 @@ CK_RV tsra_pkcs11_create_check(
     {
         return CKR_TEMPLATE_INCOMPLETE;
     }
-    return CKR_OK;
+    return (cls == CKO_PUBLIC_KEY) ? public_key_check(tmpl, count) : CKR_OK;
 }

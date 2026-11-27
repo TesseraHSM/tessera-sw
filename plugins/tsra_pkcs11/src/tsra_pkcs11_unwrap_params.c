@@ -15,6 +15,7 @@
 /* The DER tags an RSA SubjectPublicKeyInfo is made of. */
 #define DER_INTEGER 0x02
 #define DER_BIT_STRING 0x03
+#define DER_NULL 0x05
 #define DER_OID 0x06
 #define DER_SEQUENCE 0x30
 /* A length byte with this bit set counts the length bytes that follow. */
@@ -481,6 +482,8 @@ bool tsra_pkcs11_spki_rsa(const CK_BYTE *der, CK_ULONG len, tsra_pkcs11_rsa_publ
     CK_ULONG oid_len = 0;
     CK_ULONG bits_len = 0;
     CK_ULONG rsa_len = 0;
+    const CK_BYTE *params = NULL;
+    CK_ULONG params_len = 0;
     const CK_BYTE *p = der;
     if (!der_next(&p, end, DER_SEQUENCE, &spki, &spki_len) || (p != end))
     {
@@ -493,10 +496,13 @@ bool tsra_pkcs11_spki_rsa(const CK_BYTE *der, CK_ULONG len, tsra_pkcs11_rsa_publ
     {
         return false;
     }
+    /* rsaEncryption's parameters are NULL (RFC 3279), and nothing follows them. */
     const CK_BYTE *a = alg;
     if (!der_next(&a, alg + alg_len, DER_OID, &oid, &oid_len) ||
         (oid_len != sizeof(OID_RSA_ENCRYPTION)) ||
-        (memcmp(oid, OID_RSA_ENCRYPTION, sizeof(OID_RSA_ENCRYPTION)) != 0))
+        (memcmp(oid, OID_RSA_ENCRYPTION, sizeof(OID_RSA_ENCRYPTION)) != 0) ||
+        !der_next(&a, alg + alg_len, DER_NULL, &params, &params_len) || (params_len != 0) ||
+        (a != alg + alg_len))
     {
         return false;
     }

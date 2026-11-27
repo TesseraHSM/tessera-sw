@@ -63,6 +63,8 @@ testcases/ckr/test_ckr_object.py::TestCreateObjectErrors::test_invalid_class_val
 testcases/ckr/test_ckr_object.py::TestCreateObjectErrors::test_key_type_ulong_malformed_length[overlong]
 testcases/ckr/test_ckr_object.py::TestCreateObjectErrors::test_key_type_ulong_malformed_length[underlong]
 testcases/ckr/test_ckr_object.py::TestCreateObjectErrors::test_missing_class
+testcases/ckr/test_ckr_object.py::TestCreateObjectErrors::test_rsa_public_key_import_missing_exponent
+testcases/ckr/test_ckr_object.py::TestCreateObjectErrors::test_rsa_public_key_import_missing_modulus
 testcases/ckr/test_ckr_object.py::TestCreateObjectErrors::test_token_bool_overlong_length
 testcases/ckr/test_ckr_object.py::TestDestroyObjectErrors::test_destroy_already_destroyed
 testcases/ckr/test_ckr_object.py::TestFindObjectsErrors::test_find_by_class
@@ -191,11 +193,17 @@ testcases/security/test_crypto_weakness.py::TestRsaPkcsV15Encrypt::test_rsa_pkcs
 testcases/security/test_crypto_weakness.py::TestWeakRsaKeySize::test_weak_rsa_key_generation[1024-bit]
 testcases/security/test_crypto_weakness.py::TestWeakRsaKeySize::test_weak_rsa_key_generation[512-bit]
 testcases/security/test_crypto_weakness.py::TestWeakRsaKeySize::test_weak_rsa_key_generation[768-bit]
+testcases/security/test_curve_oid_confusion.py::TestCurveOidConfusion::test_short_ec_params_oid_rejected[bad_der_length_secp384r1_oid-\x06\x06+\x81\x04\x00"]
+testcases/security/test_curve_oid_confusion.py::TestCurveOidConfusion::test_short_ec_params_oid_rejected[truncated_secp384r1_oid-\x06\x05+\x81\x04\x00]
 testcases/security/test_cve_regression.py::TestDecryptCrashRegression::test_rsa_encrypt_decrypt_no_crash
+testcases/security/test_cve_regression.py::TestInvalidECCurve::test_import_ec_key_with_bad_oid
 testcases/security/test_cve_regression.py::TestSessionObjectsAfterLogout::test_session_objects_after_logout
 testcases/security/test_ec_missing_params.py::TestEcMissingParams::test_get_ec_params_on_curveless_private_key_does_not_crash
 testcases/security/test_ec_missing_params.py::TestEcMissingParams::test_get_ec_point_on_curveless_key_does_not_crash[private_with_value]
+testcases/security/test_ec_missing_params.py::TestEcMissingParams::test_get_ec_point_on_curveless_key_does_not_crash[public_bare]
+testcases/security/test_ec_missing_params.py::TestEcMissingParams::test_public_key_import_no_ec_params_does_not_crash
 testcases/security/test_ec_missing_params.py::TestEcMissingParams::test_sign_with_curveless_private_key_does_not_crash
+testcases/security/test_ec_missing_params.py::TestEcMissingParams::test_verify_with_curveless_public_key_does_not_crash
 testcases/security/test_ecdsa_low_s.py::TestEcdsaLowSPosture::test_low_s_and_malleability
 testcases/security/test_ffi_alignment.py::TestMisalignedAttributeValues::test_generate_key_with_misaligned_scalar_attribute_values
 testcases/security/test_ffi_length_boundary.py::TestGcmAadLengthBoundary::test_gcm_aad_length_boundary[isize_max]
@@ -410,9 +418,6 @@ testcases/test_ec_curves.py::TestECKeygen::test_ec_key_type[P-521]
 testcases/test_ec_curves.py::TestECKeygen::test_ec_keygen[P-256]
 testcases/test_ec_curves.py::TestECKeygen::test_ec_keygen[P-384]
 testcases/test_ec_curves.py::TestECKeygen::test_ec_keygen[P-521]
-testcases/test_ec_import_coherence.py::test_ec_public_key_import_is_coherent[brainpoolP256r1]
-testcases/test_ec_import_coherence.py::test_ec_public_key_import_is_coherent[secp224r1]
-testcases/test_ec_import_coherence.py::test_ec_public_key_import_is_coherent[secp256k1]
 testcases/test_ec_import_coherence.py::test_ec_public_key_import_is_coherent[secp256r1]
 testcases/test_ec_import_export.py::TestECPointExport::test_ec_params_is_present[secp256r1]
 testcases/test_ec_import_export.py::TestECPointExport::test_ec_params_is_present[secp384r1]
@@ -1074,3 +1079,9 @@ testcases/x509/test_lifecycle.py::TestCertificateLifecycle::test_cert_token_pers
 # it is, so the digest stays active and the second C_DigestInit is
 # CKR_OPERATION_ACTIVE. The test expects CKR_OK.
 # testcases/test_v30_session.py::TestSessionCancel::test_cancel_after_digest_init_subprocess
+
+# An EC public key on a curve the module does not support is refused
+# (CKR_CURVE_NOT_SUPPORTED), and on that refusal this test skips.
+# testcases/test_ec_import_coherence.py::test_ec_public_key_import_is_coherent[brainpoolP256r1]
+# testcases/test_ec_import_coherence.py::test_ec_public_key_import_is_coherent[secp224r1]
+# testcases/test_ec_import_coherence.py::test_ec_public_key_import_is_coherent[secp256k1]

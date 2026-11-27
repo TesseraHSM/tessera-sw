@@ -36,7 +36,7 @@ INCLUDE="$HERE/include-list.txt"
 BASELINE="$HERE/baseline.txt"
 # The include-list only grows: fewer names than this fails the gate. Raise the
 # floor when names are added; lowering it is a deliberate edit with a reason.
-FLOOR=1012
+FLOOR=1017
 # The --pr subset: return-value rules, the security probes and attributes.
 PR_FILES='^testcases/(ckr/|security/|test_attribute_|test_set_?attr)'
 # pip itself is not in requirements.txt: it runs from its wheel.

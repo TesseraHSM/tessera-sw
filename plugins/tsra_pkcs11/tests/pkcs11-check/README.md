@@ -41,7 +41,7 @@ test passes that is neither listed nor in `baseline.txt`: that test belongs on
 the list. The nightly workflow runs it.
 
 Measured on the socket simulator (2026-11-18, a shared 8-core host): `--pr`
-305 tests in 85 s, the gate 1012 tests in 176 s, `--full` about 4 minutes.
+313 tests in 110 s, the gate 1017 tests in 144 s, `--full` about 5 minutes.
 
 ## The include-list and the baseline
 
