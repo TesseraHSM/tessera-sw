@@ -102,34 +102,23 @@ fn test_ecc_generate_with_fixed_engine_instance() {
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
-            // Force the PKA instance to a fixed instance ID
-            let resp = force_pka_instance(dev, session_id, Some(0));
-            match resp {
-                Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd)) => {
-                    println!("fips_validation_hooks not enabled in the device firmware");
-                    return;
+            if !hook_supported(dev, session_id) {
+                return;
+            }
+            with_pin(dev, session_id, 0, |dev| {
+                for curve in [DdiEccCurve::P256, DdiEccCurve::P384, DdiEccCurve::P521] {
+                    let key_props =
+                        helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::App);
+                    let resp = helper_ecc_generate_key_pair(
+                        dev,
+                        Some(session_id),
+                        API_REV,
+                        curve,
+                        key_props,
+                    );
+                    assert!(resp.is_ok(), "resp {:?}", resp);
                 }
-                Err(_) => panic!("Unexpected error {:?}", resp),
-                Ok(()) => (),
-            }
-
-            for curve in [DdiEccCurve::P256, DdiEccCurve::P384, DdiEccCurve::P521] {
-                let key_props =
-                    helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::App);
-                let resp =
-                    helper_ecc_generate_key_pair(dev, Some(session_id), API_REV, curve, key_props);
-                assert!(resp.is_ok(), "resp {:?}", resp);
-            }
-
-            // Release the force PKA instance allocation
-            let resp = force_pka_instance(dev, session_id, None);
-            match resp {
-                Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd)) => {
-                    println!("fips_validation_hooks not enabled in the device firmware")
-                }
-                Err(_) => panic!("Unexpected error {:?}", resp),
-                Ok(()) => (),
-            }
+            });
         },
     );
 }
