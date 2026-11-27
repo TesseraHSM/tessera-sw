@@ -15,11 +15,12 @@
 //! it in its pkey-method list, so OpenSSL never makes it the default HMAC
 //! method and other HMAC keys, e.g. libssl's, never reach it.
 //!
-//! The key behind an `EVP_PKEY` is found in a process-global registry keyed by
-//! the payload's address. 1.1.1 reports no key free to an engine, so entries
-//! stay until [`release_hmac_keys`] at engine teardown; a lookup also requires
-//! the empty payload, which only these keys have. Since every such key has the
-//! same empty payload, `EVP_PKEY_cmp` reports any two of them equal.
+//! The key behind an `EVP_PKEY` is found in a process-global registry by a
+//! token stored as the payload's ASN1 type: unique per key and outside the
+//! `V_ASN1_*` types, so no other HMAC key matches an entry, not even one that
+//! reuses a freed key's memory. 1.1.1 reports no key free to an engine, so
+//! entries stay until [`release_hmac_keys`] at engine teardown. `EVP_PKEY_cmp`
+//! compares the payloads, so two different keys never compare equal.
 //!
 //! The method built by [`new_hmac_pkey_method`] copies the built-in HMAC method
 //! and handles contexts on a registered key itself: the message is buffered
@@ -34,6 +35,8 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicI32;
+use std::sync::atomic::Ordering;
 
 use parking_lot::Mutex;
 use tsra_ossl_engine_sys as ffi;
@@ -72,13 +75,26 @@ struct Entry {
     key: Arc<dyn HmacKey>,
 }
 
-/// Registered keys by payload address. Shared ownership lets an operation run
-/// the HSM call without holding the registry lock.
-static KEYS: OnceLock<Mutex<HashMap<usize, Entry>>> = OnceLock::new();
+/// Registered keys by token. Shared ownership lets an operation run the HSM
+/// call without holding the registry lock.
+static KEYS: OnceLock<Mutex<HashMap<c_int, Entry>>> = OnceLock::new();
 
 /// The registry.
-fn keys() -> &'static Mutex<HashMap<usize, Entry>> {
+fn keys() -> &'static Mutex<HashMap<c_int, Entry>> {
     KEYS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Tokens are this bit plus an even counter: above every `V_ASN1_*` type, and
+/// no two differ by 1, which 1.1.1f's HMAC `EVP_PKEY_cmp` (it returns the
+/// payloads' `ASN1_STRING_cmp` difference) reports as equal.
+const TOKEN_BASE: c_int = 0x4000_0000;
+
+/// Counter behind [`next_token`].
+static NEXT_TOKEN: AtomicI32 = AtomicI32::new(0);
+
+/// A token no registered key has.
+fn next_token() -> c_int {
+    TOKEN_BASE | (NEXT_TOKEN.fetch_add(2, Ordering::Relaxed) & (TOKEN_BASE - 2))
 }
 
 /// The registered engine address and key behind `pkey`, if it is one of ours.
@@ -88,8 +104,9 @@ fn key_of(pkey: *const ffi::EVP_PKEY) -> Option<(usize, Arc<dyn HmacKey>)> {
         return None;
     }
     // SAFETY: pkey is a live EVP_PKEY; base_id reads its type, get0 its payload
-    // (an octet string for an HMAC key) and get0_data that payload's bytes.
-    let payload = unsafe {
+    // (an ASN1 string for an HMAC key), get0_data and type that payload's
+    // bytes and type.
+    let token = unsafe {
         if ffi::EVP_PKEY_base_id(pkey) != ffi::EVP_PKEY_HMAC as c_int {
             return None;
         }
@@ -97,11 +114,11 @@ fn key_of(pkey: *const ffi::EVP_PKEY) -> Option<(usize, Arc<dyn HmacKey>)> {
         if payload.is_null() || !ffi::ASN1_STRING_get0_data(payload.cast()).is_null() {
             return None;
         }
-        payload
+        ffi::ASN1_STRING_type(payload.cast())
     };
     keys()
         .lock()
-        .get(&(payload as usize))
+        .get(&token)
         .map(|entry| (entry.engine, Arc::clone(&entry.key)))
 }
 
@@ -111,16 +128,18 @@ pub fn release_hmac_keys(engine: &Engine) {
     keys().lock().retain(|_, entry| entry.engine != e);
 }
 
-/// A new `EVP_PKEY_HMAC` for `key`, bound to `engine`: its payload is empty,
-/// and HMAC with it runs on the HSM through this module's method.
+/// A new `EVP_PKEY_HMAC` for `key`, bound to `engine`: its payload is empty
+/// and carries the key's token, and HMAC with it runs on the HSM through this
+/// module's method.
 #[allow(unsafe_code)]
 pub fn new_hmac_pkey(engine: &Engine, key: Box<dyn HmacKey>) -> EngineResult<*mut ffi::EVP_PKEY> {
-    // SAFETY: fresh objects; EVP_PKEY_assign takes the octet string on success,
+    let token = next_token();
+    // SAFETY: fresh objects; EVP_PKEY_assign takes the string on success,
     // otherwise it is freed here.
     let pkey = unsafe {
-        let payload = ffi::ASN1_STRING_new();
+        let payload = ffi::ASN1_STRING_type_new(token);
         if payload.is_null() {
-            return Err(EngineError::Other("ASN1_STRING_new failed".into()));
+            return Err(EngineError::Other("ASN1_STRING_type_new failed".into()));
         }
         let pkey = ffi::EVP_PKEY_new();
         if pkey.is_null() {
@@ -146,10 +165,8 @@ pub fn new_hmac_pkey(engine: &Engine, key: Box<dyn HmacKey>) -> EngineResult<*mu
         unsafe { ffi::EVP_PKEY_free(pkey) };
         return Err(e);
     }
-    // SAFETY: pkey is a live HMAC key; get0 returns its payload pointer.
-    let payload = unsafe { ffi::EVP_PKEY_get0(pkey) };
     keys().lock().insert(
-        payload as usize,
+        token,
         Entry {
             engine: engine.as_ptr() as usize,
             key: Arc::from(key),
@@ -159,13 +176,32 @@ pub fn new_hmac_pkey(engine: &Engine, key: Box<dyn HmacKey>) -> EngineResult<*mu
 }
 
 /// Per-context state of a context on a registered key.
-#[derive(Clone)]
 struct CtxState {
     /// Address of the key's engine; the key's `EVP_PKEY` keeps it alive.
     engine: usize,
     key: Arc<dyn HmacKey>,
-    /// The message so far. It may be secret, so it is scrubbed on drop.
+    /// The message so far. It may be secret, so it is scrubbed on drop; see
+    /// [`new_message`].
     message: Zeroizing<Vec<u8>>,
+}
+
+impl Clone for CtxState {
+    /// A copy with the full message capacity (see [`new_message`]).
+    fn clone(&self) -> Self {
+        let mut message = new_message();
+        message.extend_from_slice(&self.message);
+        Self {
+            engine: self.engine,
+            key: Arc::clone(&self.key),
+            message,
+        }
+    }
+}
+
+/// An empty message buffer for [`HMAC_MAX_MESSAGE`] bytes: it never
+/// reallocates, which would leave unscrubbed message bytes behind.
+fn new_message() -> Zeroizing<Vec<u8>> {
+    Zeroizing::new(Vec::with_capacity(HMAC_MAX_MESSAGE))
 }
 
 /// Side table: `EVP_PKEY_CTX` address → state, created in `init` for contexts
@@ -234,7 +270,7 @@ unsafe extern "C" fn c_init(ctx: *mut ffi::EVP_PKEY_CTX) -> c_int {
                     CtxState {
                         engine,
                         key,
-                        message: Zeroizing::new(Vec::new()),
+                        message: new_message(),
                     },
                 );
             }
@@ -244,21 +280,32 @@ unsafe extern "C" fn c_init(ctx: *mut ffi::EVP_PKEY_CTX) -> c_int {
     )
 }
 
-/// `copy` override: on a registered key, copy the state (including the message
-/// so far: `EVP_DigestSignFinal` finalizes on a copy); its built-in HMAC state
-/// was never initialized and cannot be copied. Otherwise the built-in copy.
+/// `copy` override: on a registered key, a fresh built-in state (inherited
+/// callbacks such as keygen read it; the source's HMAC state was never keyed
+/// and cannot be copied) and a copy of the state, including the message so
+/// far (`EVP_DigestSignFinal` finalizes on a copy). Otherwise the built-in
+/// copy.
 /// # Safety
 /// Called only by OpenSSL during `EVP_PKEY_CTX_dup`.
 #[allow(unsafe_code)]
 unsafe extern "C" fn c_copy(dst: *mut ffi::EVP_PKEY_CTX, src: *mut ffi::EVP_PKEY_CTX) -> c_int {
     catch_panic(
         || {
+            let Ok(d) = defaults() else {
+                return RetCode::Fail.into();
+            };
             let state = ctx_state().lock().get(&(src as usize)).cloned();
             if let Some(state) = state {
+                if let Some(init) = d.init {
+                    // SAFETY: dst is the new context, its built-in data unset.
+                    if !ossl_ok(unsafe { init(dst) }) {
+                        return RetCode::Fail.into();
+                    }
+                }
                 ctx_state().lock().insert(dst as usize, state);
                 return RetCode::Success.into();
             }
-            let Some(copy) = defaults().ok().and_then(|d| d.copy) else {
+            let Some(copy) = d.copy else {
                 return RetCode::Fail.into();
             };
             // SAFETY: delegating the ctx pair OpenSSL passed us.
@@ -696,9 +743,9 @@ mod tests {
         // SAFETY: pkey is ours; it holds an engine reference, so it goes first.
         unsafe { ffi::EVP_PKEY_free(pkey) };
         release_hmac_keys(engine);
+        crate::pkey_method::release_pkey_methods(engine);
         // SAFETY: raw is the ENGINE_new reference.
         unsafe { ffi::ENGINE_free(raw) };
-        crate::pkey_method::release_pkey_methods(engine);
     }
 
     /// An engine key MACs through the key, in one update or in pieces, and a
@@ -787,6 +834,114 @@ mod tests {
 
             release_hmac_keys(&engine);
             assert!(try_mac(pkey, sha256, &[b"m"]).is_err(), "released key");
+        }
+        teardown(raw, &engine, pkey);
+    }
+
+    /// Only a registered key's own payload finds it: an empty HMAC key bound
+    /// to the engine is refused, also one allocated right after an engine key
+    /// was freed (which typically reuses its memory), and two engine keys
+    /// compare unequal.
+    #[test]
+    #[allow(unsafe_code)]
+    fn registry_finds_only_registered_keys() {
+        let (raw, engine, pkey) = engine_and_key();
+        // SAFETY: EVP_sha256 returns a process-lifetime constant; the keys
+        // built here are freed below.
+        unsafe {
+            let sha256 = ffi::EVP_sha256();
+            let other = new_hmac_pkey(&engine, Box::new(SoftwareBackedKey)).unwrap();
+            assert_ne!(ffi::EVP_PKEY_cmp(pkey, other), 1);
+            assert_ne!(ffi::EVP_PKEY_cmp(other, pkey), 1);
+            ffi::EVP_PKEY_free(other);
+
+            let foreign = ffi::EVP_PKEY_new();
+            assert_eq!(
+                ffi::EVP_PKEY_assign(
+                    foreign,
+                    ffi::EVP_PKEY_HMAC as c_int,
+                    ffi::ASN1_STRING_new().cast()
+                ),
+                1
+            );
+            assert_eq!(ffi::EVP_PKEY_set1_engine(foreign, engine.as_ptr()), 1);
+            assert!(try_mac(foreign, sha256, &[b"m"]).is_err(), "foreign key");
+            ffi::EVP_PKEY_free(foreign);
+        }
+        teardown(raw, &engine, pkey);
+    }
+
+    /// A copied signing context carries on with the message so far, apart
+    /// from the original.
+    #[test]
+    #[allow(unsafe_code)]
+    fn copied_context_continues_the_message() {
+        let (raw, engine, pkey) = engine_and_key();
+        let (a, b) = RFC4231_MSG.split_at(10);
+        // SAFETY: the EVP_DigestSign sequence on a live key; both contexts
+        // are freed below.
+        unsafe {
+            let ctx = ffi::EVP_MD_CTX_new();
+            let copy = ffi::EVP_MD_CTX_new();
+            assert_eq!(
+                ffi::EVP_DigestSignInit(ctx, null_mut(), ffi::EVP_sha256(), null_mut(), pkey),
+                1
+            );
+            assert_eq!(ffi::EVP_DigestUpdate(ctx, a.as_ptr().cast(), a.len()), 1);
+            assert_eq!(ffi::EVP_MD_CTX_copy_ex(copy, ctx), 1);
+            assert_eq!(ffi::EVP_DigestUpdate(copy, b.as_ptr().cast(), b.len()), 1);
+            for (mctx, want) in [
+                (copy, RFC4231_MAC.to_vec()),
+                (ctx, SoftwareBackedKey.sign(&engine, a).unwrap()),
+            ] {
+                let mut mac = [0u8; 32];
+                let mut len = mac.len();
+                assert_eq!(
+                    ffi::EVP_DigestSignFinal(mctx, mac.as_mut_ptr(), &mut len),
+                    1
+                );
+                assert_eq!(mac[..len], want[..]);
+            }
+            ffi::EVP_MD_CTX_free(copy);
+            ffi::EVP_MD_CTX_free(ctx);
+        }
+        teardown(raw, &engine, pkey);
+    }
+
+    /// A state copy keeps the full message capacity, so updates on it never
+    /// reallocate the message.
+    #[test]
+    fn state_copy_keeps_message_capacity() {
+        let mut state = CtxState {
+            engine: 0,
+            key: Arc::new(SoftwareBackedKey),
+            message: new_message(),
+        };
+        state.message.extend_from_slice(b"abc");
+        let copy = state.clone();
+        assert_eq!(copy.message.as_slice(), b"abc");
+        assert!(copy.message.capacity() >= HMAC_MAX_MESSAGE);
+    }
+
+    /// Key generation on a duplicate of an engine-key context fails cleanly:
+    /// the duplicate has the built-in state the inherited keygen reads.
+    #[test]
+    #[allow(unsafe_code)]
+    fn duplicated_context_refuses_keygen() {
+        let (raw, engine, pkey) = engine_and_key();
+        // SAFETY: contexts on a live key, freed below.
+        unsafe {
+            let ctx = ffi::EVP_PKEY_CTX_new(pkey, null_mut());
+            assert!(!ctx.is_null());
+            let dup = ffi::EVP_PKEY_CTX_dup(ctx);
+            assert!(!dup.is_null());
+            assert_eq!(ffi::EVP_PKEY_keygen_init(dup), 1);
+            let mut generated = null_mut();
+            assert_ne!(ffi::EVP_PKEY_keygen(dup, &mut generated), 1);
+            assert!(generated.is_null());
+            ffi::EVP_PKEY_CTX_free(dup);
+            ffi::EVP_PKEY_CTX_free(ctx);
+            ffi::ERR_clear_error();
         }
         teardown(raw, &engine, pkey);
     }

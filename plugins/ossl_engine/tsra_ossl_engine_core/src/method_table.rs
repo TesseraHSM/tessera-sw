@@ -22,7 +22,9 @@
 //!   leave a dangling entry that a reused ENGINE address would later pick
 //!   up).
 //! - [`MethodTable::release`] drops the engine's entries address-only,
-//!   dereferencing nothing — the framework frees the methods itself.
+//!   dereferencing nothing — the framework frees the methods itself. It frees
+//!   only the advertised NIDs' methods, so the owner takes the unadvertised
+//!   ones out with [`MethodTable::take_unadvertised`] and frees them.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -142,6 +144,18 @@ impl<M> MethodTable<M> {
             .lock()
             .insert((engine.as_ptr() as usize, nid), method);
         Ok(())
+    }
+
+    /// Remove `engine`'s entries for unadvertised NIDs and return their
+    /// methods for the caller to free.
+    pub(crate) fn take_unadvertised(&self, engine: &Engine) -> Vec<*mut M> {
+        let e = engine.as_ptr() as usize;
+        let mut entries = self.entries().lock();
+        self.unadvertised
+            .iter()
+            .filter_map(|nid| entries.remove(&(e, *nid)))
+            .map(|m| m as *mut M)
+            .collect()
     }
 
     /// Drop all of `engine`'s entries (address-only).
@@ -276,6 +290,37 @@ mod tests {
             drop(Box::from_raw(stored_b));
             ffi::ENGINE_free(raw_a);
             ffi::ENGINE_free(raw_b);
+        }
+    }
+
+    // take_unadvertised hands out the engine's unadvertised methods once and
+    // leaves its advertised entries in place.
+    #[test]
+    #[allow(unsafe_code)]
+    fn take_unadvertised_returns_only_unadvertised_methods() {
+        static UNADVERTISED: [c_int; 1] = [201];
+        let table: MethodTable<u8> = MethodTable::with_unadvertised(&NIDS, &UNADVERTISED);
+        // SAFETY: a fresh ENGINE, freed below; methods are dummy heap bytes
+        // reclaimed via Box::from_raw.
+        unsafe {
+            let raw = ffi::ENGINE_new();
+            let engine = Engine::from_ptr(NonNull::new(raw).unwrap());
+            table.register(&engine, 101, build).unwrap();
+            table.register(&engine, 201, build).unwrap();
+
+            let Some(Lookup::Stored(unadvertised)) = table.lookup(raw, 201) else {
+                unreachable!("an unadvertised NID must resolve to the stored entry")
+            };
+            assert_eq!(table.take_unadvertised(&engine), vec![unadvertised]);
+            assert!(table.take_unadvertised(&engine).is_empty(), "taken once");
+            let Some(Lookup::Stored(advertised)) = table.lookup(raw, 101) else {
+                unreachable!("the advertised entry must stay stored")
+            };
+
+            table.release(&engine);
+            drop(Box::from_raw(unadvertised));
+            drop(Box::from_raw(advertised));
+            ffi::ENGINE_free(raw);
         }
     }
 }

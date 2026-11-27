@@ -109,6 +109,8 @@ fn main() {
         .allowlist_function("PKCS8_pkey_get0")
         .allowlist_function("X509_ALGOR_get0")
         .allowlist_function("ASN1_STRING_new")
+        .allowlist_function("ASN1_STRING_type_new")
+        .allowlist_function("ASN1_STRING_type")
         .allowlist_function("ASN1_STRING_free")
         .allowlist_function("ASN1_STRING_set0")
         .allowlist_function("BIO_new")

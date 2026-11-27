@@ -135,8 +135,9 @@ impl DestroyHandler for TsraDestroy {
         // Unconditional (no-op-safe): if bind failed after registering the
         // methods but before parking EngineData, the table entries and the
         // global ASN1 registration still need cleaning. The framework has
-        // already freed the methods themselves (engine_pkey_(asn1_)meths_free
-        // run before this hook); only stale pointers are dropped here.
+        // already freed the advertised methods (engine_pkey_(asn1_)meths_free
+        // run before this hook); release_pkey_methods frees the unadvertised
+        // HMAC method and drops the stale pointers.
         tsra_ossl_engine_core::pkey_method::release_pkey_methods(engine);
         tsra_ossl_engine_core::hmac_method::release_hmac_keys(engine);
         tsra_ossl_engine_core::asn1_method::release_ec_asn1_method(engine);
