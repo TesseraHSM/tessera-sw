@@ -171,9 +171,10 @@ typedef struct
 
 /*
  * Read the modulus and public exponent out of a DER SubjectPublicKeyInfo of an
- * rsaEncryption key (RFC 3279). false for anything else: another algorithm, a
- * truncated or over-long element, a length not in its minimal DER form, bytes
- * after the structure, or a negative or zero integer.
+ * rsaEncryption key (RFC 3279). false for anything else: another algorithm,
+ * parameters other than NULL, a truncated or over-long element, a length not in
+ * its minimal DER form, bytes after the structure, or a negative or zero
+ * integer.
  */
 bool tsra_pkcs11_spki_rsa(const CK_BYTE *der, CK_ULONG len, tsra_pkcs11_rsa_public *out);
 

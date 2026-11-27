@@ -9,9 +9,12 @@ output lives in the build directory only and is never committed:
 
     gen_wycheproof.py <wycheproof testvectors_v1 dir> <out dir>
 
-Writes aes_kwp.inc, aes_cbc_pkcs5.inc and aes_gcm.inc, each one array of a
-struct from integration-tests/cpp/vectors/wycheproof.hpp. AES-GCM keeps only
-what the device takes: a 256-bit key, a 96-bit IV and a 128-bit tag.
+Writes aes_kwp.inc, aes_cbc_pkcs5.inc, aes_gcm.inc and ecdh_ecpoint.inc, each
+one array of a struct from integration-tests/cpp/vectors/wycheproof.hpp.
+AES-GCM keeps only what the device takes: a 256-bit key, a 96-bit IV and a
+128-bit tag. ECDH keeps the peer points the token must refuse and each
+curve's normal case as their control: the other valid vectors need their
+private key on the token.
 """
 import json
 import os
@@ -66,6 +69,25 @@ def main():
             for _, t in cases(src, "aes_gcm_test.json", device)]
     emit(out, "aes_gcm.inc", "aes_gcm_test.json, 256-bit keys, 96-bit IVs, 128-bit tags",
          "WycheproofGcm", "kWycheproofAesGcm", rows)
+
+    # The "acceptable" ECDH vectors are compressed points, which this module
+    # refuses like the invalid ones; any other acceptable vector must not slip by.
+    rows = []
+    for curve, name in (("P-256", "secp256r1"), ("P-384", "secp384r1"), ("P-521", "secp521r1")):
+        fname = f"ecdh_{name}_ecpoint_test.json"
+        for group in json.load(open(os.path.join(src, fname)))["testGroups"]:
+            for t in group["tests"]:
+                result = t["result"]
+                if (result == "acceptable") and ("CompressedPoint" not in t["flags"]):
+                    sys.exit(f"{fname} tcId {t['tcId']}: acceptable but not compressed")
+                if result not in ("valid", "invalid", "acceptable"):
+                    sys.exit(f"{fname} tcId {t['tcId']}: result {result}")
+                if (result != "valid") or ("Normal" in t["flags"]):
+                    rows.append([str(t["tcId"]), q(curve), q(t["public"]),
+                                 str(result == "valid").lower()])
+    emit(out, "ecdh_ecpoint.inc",
+         "ecdh_secp256r1/384r1/521r1_ecpoint_test.json, refused points and the normal cases",
+         "WycheproofEcPoint", "kWycheproofEcdhPoints", rows)
 
 
 if __name__ == "__main__":

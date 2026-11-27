@@ -10,18 +10,19 @@
  */
 
 #include "tsra_pkcs11_mech.h"
+#include "tsra_pkcs11_derive_params.h"
 #include "tsra_pkcs11_ec_template.h"
 #include "tsra_pkcs11_template.h"
 
 #include <stddef.h>
 
 /* The entry-point flags some entry point implements, the only ones a row may
- * carry besides the EC capability flags of an EC row. The piece that
- * implements another entry point (C_DeriveKey, ...) adds its flag here with its
+ * carry besides the EC capability flags of an EC row. A change that
+ * implements another entry point (C_WrapKey, ...) adds its flag here with its
  * rows. */
 #define P11_IMPLEMENTED_FLAGS                                                                      \
     (CKF_ENCRYPT | CKF_DECRYPT | CKF_DIGEST | CKF_SIGN | CKF_VERIFY | CKF_GENERATE |               \
-     CKF_GENERATE_KEY_PAIR | CKF_UNWRAP)
+     CKF_GENERATE_KEY_PAIR | CKF_UNWRAP | CKF_DERIVE)
 
 /* X(type, min_key, max_key, flags), one per implemented mechanism. */
 #define P11_MECHS(X)                                                                               \
@@ -43,7 +44,9 @@
     X(CKM_ECDSA_SHA384, EC_MIN_KEY_BITS, EC_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY | EC_MECH_FLAGS)   \
     X(CKM_ECDSA_SHA512, EC_MIN_KEY_BITS, EC_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY | EC_MECH_FLAGS)   \
     X(CKM_RSA_PKCS_KEY_PAIR_GEN, RSA_UNWRAP_KEY_BITS, RSA_UNWRAP_KEY_BITS, CKF_GENERATE_KEY_PAIR)  \
-    X(CKM_RSA_AES_KEY_WRAP, RSA_UNWRAP_KEY_BITS, RSA_UNWRAP_KEY_BITS, CKF_UNWRAP)
+    X(CKM_RSA_AES_KEY_WRAP, RSA_UNWRAP_KEY_BITS, RSA_UNWRAP_KEY_BITS, CKF_UNWRAP)                  \
+    X(CKM_ECDH1_DERIVE, EC_MIN_KEY_BITS, EC_MAX_KEY_BITS, CKF_DERIVE | EC_MECH_FLAGS)              \
+    X(CKM_HKDF_DERIVE, ECDH_SECRET_MIN_BYTES, ECDH_SECRET_MAX_BYTES, CKF_DERIVE)
 
 #define P11_MECH_ROW(t, lo, hi, f) { (t), (lo), (hi), (f) },
 

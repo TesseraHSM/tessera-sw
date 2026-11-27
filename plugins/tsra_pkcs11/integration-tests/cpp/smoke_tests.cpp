@@ -167,7 +167,22 @@ TEST_F(smoke_login, every_advertised_mechanism_has_an_init_path)
     gcm_params.ulTagBits = AES_GCM_TAG_LEN * 8;
 
     const CK_FLAGS driven = CKF_DIGEST | CKF_GENERATE | CKF_GENERATE_KEY_PAIR | CKF_ENCRYPT |
-                            CKF_DECRYPT | CKF_SIGN | CKF_VERIFY | CKF_UNWRAP;
+                            CKF_DECRYPT | CKF_SIGN | CKF_VERIFY | CKF_UNWRAP | CKF_DERIVE;
+    /* The ECDH secret the HKDF row derives from: a deriving pair agreeing
+     * with its own public point. */
+    CK_OBJECT_HANDLE dh_pub = 0, dh_priv = 0, secret = 0;
+    ASSERT_CKR_OK(
+        gen_ec_pair(s_, ec_curves()[0], false, CK_FALSE, CK_TRUE, "init-dh", &dh_pub, &dh_priv)
+    );
+    std::vector<CK_BYTE> dh_point = ec_point(s_, dh_pub);
+    ASSERT_FALSE(dh_point.empty());
+    CK_ECDH1_DERIVE_PARAMS ecdh = { CKD_NULL, 0, nullptr, dh_point.size(), dh_point.data() };
+    CK_HKDF_PARAMS hkdf = { CK_TRUE,           CK_TRUE, CKM_SHA256, CKF_HKDF_SALT_NULL, nullptr, 0,
+                            CK_INVALID_HANDLE, nullptr, 0 };
+    CK_OBJECT_CLASS secret_class = CKO_SECRET_KEY;
+    CK_KEY_TYPE generic = CKK_GENERIC_SECRET;
+    CK_KEY_TYPE aes = CKK_AES;
+    CK_ULONG aes_len = AES256_KEY_BYTES;
     for (CK_MECHANISM_TYPE m : mechs)
     {
         SCOPED_TRACE(::testing::Message() << "mechanism 0x" << std::hex << m);
@@ -275,6 +290,34 @@ TEST_F(smoke_login, every_advertised_mechanism_has_an_init_path)
             EXPECT_CKR_OK(p11()->C_EncryptInit(s_, nullptr, key));
             EXPECT_CKR_OK(p11()->C_DecryptInit(s_, &mech, key));
             EXPECT_CKR_OK(p11()->C_DecryptInit(s_, nullptr, key));
+        }
+        if ((info.flags & CKF_DERIVE) != 0)
+        {
+            CK_ATTRIBUTE to_secret[] = {
+                { CKA_CLASS, &secret_class, sizeof(secret_class) },
+                { CKA_KEY_TYPE, &generic, sizeof(generic) },
+            };
+            CK_ATTRIBUTE to_aes[] = {
+                { CKA_CLASS, &secret_class, sizeof(secret_class) },
+                { CKA_KEY_TYPE, &aes, sizeof(aes) },
+                { CKA_VALUE_LEN, &aes_len, sizeof(aes_len) },
+            };
+            CK_OBJECT_HANDLE key = 0;
+            switch (m)
+            {
+            case CKM_ECDH1_DERIVE:
+                mech = { m, &ecdh, sizeof(ecdh) };
+                EXPECT_CKR_OK(p11()->C_DeriveKey(s_, &mech, dh_priv, to_secret, 2, &secret));
+                break;
+            case CKM_HKDF_DERIVE:
+                ASSERT_NE(0u, secret) << "the table lists CKM_ECDH1_DERIVE first";
+                mech = { m, &hkdf, sizeof(hkdf) };
+                EXPECT_CKR_OK(p11()->C_DeriveKey(s_, &mech, secret, to_aes, 3, &key));
+                break;
+            default:
+                ADD_FAILURE() << "no base key for this derive mechanism";
+                break;
+            }
         }
     }
 }

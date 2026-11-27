@@ -306,28 +306,6 @@ CK_RV C_WrapKey(
     return CKR_FUNCTION_NOT_SUPPORTED;
 }
 
-CK_RV C_DeriveKey(
-    CK_SESSION_HANDLE hSession,
-    CK_MECHANISM_PTR pMechanism,
-    CK_OBJECT_HANDLE hBaseKey,
-    CK_ATTRIBUTE_PTR pTemplate,
-    CK_ULONG ulAttributeCount,
-    CK_OBJECT_HANDLE_PTR phKey
-)
-{
-    if (!g_tsra_pkcs11.initialized)
-    {
-        return CKR_CRYPTOKI_NOT_INITIALIZED;
-    }
-    (void)hSession;
-    (void)pMechanism;
-    (void)hBaseKey;
-    (void)pTemplate;
-    (void)ulAttributeCount;
-    (void)phKey;
-    return CKR_FUNCTION_NOT_SUPPORTED;
-}
-
 CK_RV C_GetFunctionStatus(CK_SESSION_HANDLE hSession)
 {
     if (!g_tsra_pkcs11.initialized)

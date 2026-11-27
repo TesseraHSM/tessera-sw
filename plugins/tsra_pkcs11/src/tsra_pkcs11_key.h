@@ -49,14 +49,19 @@ extern "C"
  * CKK_AES_XTS), while the device has three disjoint kinds with distinct
  * handles and validators, so the kind travels with every key call. Named
  * here rather than as TSRA_KEY_KIND_* so the entry points stay compilable
- * without tsra.h; tsra_pkcs11_key.c translates it in device_kind() and
- * refuses any value outside the enum.
+ * without tsra.h; tsra_pkcs11_key.c translates it (device_kind() for the AES
+ * kinds, hkdf_target() for what HKDF derives) and refuses any other value.
+ * The last four exist only as C_DeriveKey output.
  */
 typedef enum
 {
-    TSRA_PKCS11_KIND_AES = 0, /* CKM_AES_CBC, CKM_AES_CBC_PAD */
-    TSRA_PKCS11_KIND_AES_GCM, /* CKM_AES_GCM */
-    TSRA_PKCS11_KIND_AES_XTS, /* CKM_AES_XTS */
+    TSRA_PKCS11_KIND_AES = 0,       /* CKM_AES_CBC, CKM_AES_CBC_PAD */
+    TSRA_PKCS11_KIND_AES_GCM,       /* CKM_AES_GCM */
+    TSRA_PKCS11_KIND_AES_XTS,       /* CKM_AES_XTS */
+    TSRA_PKCS11_KIND_SHARED_SECRET, /* the ECDH secret, CKM_HKDF_DERIVE */
+    TSRA_PKCS11_KIND_HMAC_SHA256,   /* CKK_SHA256_HMAC */
+    TSRA_PKCS11_KIND_HMAC_SHA384,   /* CKK_SHA384_HMAC */
+    TSRA_PKCS11_KIND_HMAC_SHA512,   /* CKK_SHA512_HMAC */
 } tsra_pkcs11_key_kind_t;
 
 /*
@@ -391,6 +396,57 @@ CK_RV tsra_pkcs11_key_verify_stream_final(uint32_t ctx, const CK_BYTE *sig, CK_U
 
 /* Free a sign or verify stream context (no-op if 0). */
 void tsra_pkcs11_key_sign_stream_free(uint32_t ctx);
+
+/*
+ * CKM_ECDH1_DERIVE with CKD_NULL: unmask the EC key pair blob `blob` in
+ * `hsm_session`, check that the device puts it on `curve` (the curve the
+ * object names), and agree with the peer whose DER SubjectPublicKeyInfo is
+ * `peer` on that curve. Returns the masked blob of the shared secret (a
+ * shared-secret key that only derives, as long as the curve: 256, 384 or 521
+ * bits), masked under the masking key `scope` names, as
+ * tsra_pkcs11_key_aes_generate returns its blob. Device handles are released
+ * on every path. CKR_MECHANISM_PARAM_INVALID when the SDK refuses the peer
+ * key (a point not on the curve), CKR_KEY_HANDLE_INVALID when the pair is not
+ * on `curve`.
+ */
+CK_RV tsra_pkcs11_key_ecdh(
+    uint32_t hsm_session,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    tsra_pkcs11_ec_curve_t curve,
+    const CK_BYTE *peer,
+    CK_ULONG peer_len,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+);
+
+/*
+ * CKM_HKDF_DERIVE, extract and expand: unmask the shared secret blob `secret`
+ * in `hsm_session` and derive from it, with HMAC over `prf` (CKM_SHA256,
+ * CKM_SHA384 or CKM_SHA512), the optional `salt` and `info`, a key of `kind`
+ * (TSRA_PKCS11_KIND_AES or an HMAC kind) and `bit_len` bits, masked under the
+ * masking key `scope` names. Returns its masked blob as
+ * tsra_pkcs11_key_aes_generate does. An empty salt or info is passed as none,
+ * which HKDF treats alike (RFC 5869). The caller bounds both lengths
+ * (HKDF_MAX_SALT_LEN, HKDF_MAX_INFO_LEN). Device handles are released on
+ * every path.
+ */
+CK_RV tsra_pkcs11_key_hkdf(
+    uint32_t hsm_session,
+    const CK_BYTE *secret,
+    CK_ULONG secret_len,
+    CK_MECHANISM_TYPE prf,
+    const CK_BYTE *salt,
+    CK_ULONG salt_len,
+    const CK_BYTE *info,
+    CK_ULONG info_len,
+    tsra_pkcs11_key_kind_t kind,
+    uint32_t bit_len,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+);
 
 #ifdef __cplusplus
 }

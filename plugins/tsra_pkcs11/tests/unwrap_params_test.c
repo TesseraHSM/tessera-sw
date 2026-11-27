@@ -815,9 +815,19 @@ static void test_build(void)
 #define N_BYTE 0x5A  /* every modulus byte: positive, so no sign byte */
 #define SPKI_MAX 320 /* an SPKI with a modulus of up to 256 bytes */
 
+/* The AlgorithmIdentifier's parts: the tags its parameters are tested with,
+ * and rsaEncryption, 1.2.840.113549.1.1.1 (RFC 3279), as a DER OID TLV. */
+#define TAG_OCTET_STRING 0x04
+#define TAG_NULL 0x05
+#define TAG_OID 0x06
+#define RSA_OID_LEN 9
+#define RSA_OID_TLV TAG_OID, RSA_OID_LEN, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01
+#define RSA_OID_TLV_LEN (TLV_HEAD + RSA_OID_LEN)
+/* The content length of AlgorithmIdentifier { rsaEncryption, NULL }. */
+#define ALG_NULL_LEN (RSA_OID_TLV_LEN + TLV_HEAD)
 /* AlgorithmIdentifier { rsaEncryption, NULL } and INTEGER 65537 in DER. */
-static const CK_BYTE RSA_ALG[] = { 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86,
-                                   0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00 };
+static const CK_BYTE RSA_ALG[] = { TAG_SEQUENCE, ALG_NULL_LEN, RSA_OID_TLV, TAG_NULL, 0 };
+_Static_assert(sizeof(RSA_ALG) == TLV_HEAD + ALG_NULL_LEN, "RSA_OID_LEN counts the OID's bytes");
 static const CK_BYTE E_65537[] = { 0x02, 0x03, 0x01, 0x00, 0x01 };
 
 /* The fewest long-form length bytes `len` needs; 0 for the short form. */
@@ -844,20 +854,26 @@ static void put_head(CK_BYTE *out, size_t *k, CK_BYTE tag, size_t len, size_t le
 }
 
 /*
- * An rsaEncryption SubjectPublicKeyInfo with exponent 65537 and a modulus of
- * `n_len` N_BYTE bytes, whose INTEGER length takes `n_len_bytes` long-form
- * length bytes (0 for the short form); every other length is minimal. Returns
- * its length; `out` holds SPKI_MAX bytes.
+ * A SubjectPublicKeyInfo with the DER AlgorithmIdentifier `alg`, exponent 65537
+ * and a modulus of `n_len` N_BYTE bytes, whose INTEGER length takes
+ * `n_len_bytes` long-form length bytes (0 for the short form); every other
+ * length is minimal. Returns its length; `out` holds SPKI_MAX bytes.
  */
-static size_t rsa_spki(CK_BYTE *out, size_t n_len, size_t n_len_bytes)
+static size_t spki_with_alg(
+    CK_BYTE *out,
+    const CK_BYTE *alg,
+    size_t alg_len,
+    size_t n_len,
+    size_t n_len_bytes
+)
 {
     size_t rsa = (TLV_HEAD + n_len_bytes + n_len) + sizeof(E_65537);
     size_t bits = 1 + (TLV_HEAD + min_len_bytes(rsa) + rsa);
-    size_t outer = sizeof(RSA_ALG) + (TLV_HEAD + min_len_bytes(bits) + bits);
+    size_t outer = alg_len + (TLV_HEAD + min_len_bytes(bits) + bits);
     size_t k = 0;
     put_head(out, &k, TAG_SEQUENCE, outer, min_len_bytes(outer));
-    memcpy(out + k, RSA_ALG, sizeof(RSA_ALG));
-    k += sizeof(RSA_ALG);
+    memcpy(out + k, alg, alg_len);
+    k += alg_len;
     put_head(out, &k, TAG_BIT_STRING, bits, min_len_bytes(bits));
     out[k++] = 0; /* no unused bits */
     put_head(out, &k, TAG_SEQUENCE, rsa, min_len_bytes(rsa));
@@ -866,6 +882,12 @@ static size_t rsa_spki(CK_BYTE *out, size_t n_len, size_t n_len_bytes)
     k += n_len;
     memcpy(out + k, E_65537, sizeof(E_65537));
     return k + sizeof(E_65537);
+}
+
+/* spki_with_alg with { rsaEncryption, NULL }. */
+static size_t rsa_spki(CK_BYTE *out, size_t n_len, size_t n_len_bytes)
+{
+    return spki_with_alg(out, RSA_ALG, sizeof(RSA_ALG), n_len, n_len_bytes);
 }
 
 static void test_der_lengths(void)
@@ -893,6 +915,47 @@ static void test_der_lengths(void)
         tsra_pkcs11_rsa_public key;
         bool ok = tsra_pkcs11_spki_rsa(spki, len, &key);
         CHECK((ok == rows[i].ok) && (!ok || (key.n_len == rows[i].n_len)), rows[i].what);
+    }
+}
+
+static void test_alg_params(void)
+{
+    printf("== spki_rsa: AlgorithmIdentifier parameters ==\n");
+    static const CK_BYTE absent[] = { TAG_SEQUENCE, RSA_OID_TLV_LEN, RSA_OID_TLV };
+    static const CK_BYTE truncated[] = { TAG_SEQUENCE, ALG_NULL_LEN, RSA_OID_TLV, TAG_NULL, 1 };
+    static const CK_BYTE content[] = {
+        TAG_SEQUENCE, ALG_NULL_LEN + 1, RSA_OID_TLV, TAG_NULL, 1, 0
+    };
+    static const CK_BYTE trailing[] = {
+        TAG_SEQUENCE, ALG_NULL_LEN + 1, RSA_OID_TLV, TAG_NULL, 0, 0
+    };
+    static const CK_BYTE other[] = { TAG_SEQUENCE, ALG_NULL_LEN, RSA_OID_TLV, TAG_OCTET_STRING, 0 };
+    struct
+    {
+        const CK_BYTE *alg;
+        size_t len;
+        bool ok;
+        const char *what;
+    } rows[] = {
+        { RSA_ALG, sizeof(RSA_ALG), true, "NULL parameters are read" },
+        { absent, sizeof(absent), false, "absent parameters are refused" },
+        { truncated, sizeof(truncated), false, "a NULL whose length runs past the end is refused" },
+        { content, sizeof(content), false, "a NULL with content is refused" },
+        { trailing, sizeof(trailing), false, "a byte after the NULL is refused" },
+        { other, sizeof(other), false, "an OCTET STRING instead of the NULL is refused" },
+    };
+    for (size_t i = 0; i < COUNT(rows); i++)
+    {
+        CK_BYTE spki[SPKI_MAX];
+        size_t len = spki_with_alg(
+            spki,
+            rows[i].alg,
+            rows[i].len,
+            RSA_UNWRAP_MODULUS_BYTES,
+            min_len_bytes(RSA_UNWRAP_MODULUS_BYTES)
+        );
+        tsra_pkcs11_rsa_public key;
+        CHECK(tsra_pkcs11_spki_rsa(spki, len, &key) == rows[i].ok, rows[i].what);
     }
 }
 
@@ -936,6 +999,7 @@ int main(void)
     test_pair_check();
     test_build();
     test_der_lengths();
+    test_alg_params();
     test_match();
     printf(
         g_fail ? "\nunwrap_params_test: FAILED (%d checks)\n"

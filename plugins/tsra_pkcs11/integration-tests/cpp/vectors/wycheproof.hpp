@@ -49,4 +49,15 @@ struct WycheproofGcm
     bool valid;
 };
 
+/// An ECDH peer's public point (SEC 1, as CK_ECDH1_DERIVE_PARAMS takes it) on
+/// curve ("P-256", ...). `valid` is whether the token takes it: invalid points
+/// and compressed ones are refused, whatever Wycheproof says of the latter.
+struct WycheproofEcPoint
+{
+    int tc_id;
+    const char *curve;
+    const char *pub;
+    bool valid;
+};
+
 } // namespace vectors

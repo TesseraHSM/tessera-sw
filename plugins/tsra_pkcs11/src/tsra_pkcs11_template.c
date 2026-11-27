@@ -30,6 +30,8 @@ static const tsra_pkcs11_keygen_policy POLICY_AES = {
     .value_lens = { AES128_KEY_BYTES, AES192_KEY_BYTES, AES256_KEY_BYTES, 0 },
     .mechs = { CKM_AES_CBC, CKM_AES_CBC_PAD },
     .mech_count = 2,
+    .usages = { CKA_ENCRYPT, CKA_DECRYPT },
+    .usage_count = 2,
 };
 static const tsra_pkcs11_keygen_policy POLICY_AES_GCM = {
     .keygen_mech = CKM_AES_KEY_GEN,
@@ -38,6 +40,8 @@ static const tsra_pkcs11_keygen_policy POLICY_AES_GCM = {
     .value_lens = { AES256_KEY_BYTES, 0 },
     .mechs = { CKM_AES_GCM },
     .mech_count = 1,
+    .usages = { CKA_ENCRYPT, CKA_DECRYPT },
+    .usage_count = 2,
 };
 static const tsra_pkcs11_keygen_policy POLICY_AES_XTS = {
     .keygen_mech = CKM_AES_XTS_KEY_GEN,
@@ -46,6 +50,8 @@ static const tsra_pkcs11_keygen_policy POLICY_AES_XTS = {
     .value_lens = { AES_XTS_KEY_BYTES, 0 },
     .mechs = { CKM_AES_XTS },
     .mech_count = 1,
+    .usages = { CKA_ENCRYPT, CKA_DECRYPT },
+    .usage_count = 2,
 };
 
 static const tsra_pkcs11_cipher_mech CIPHER_MECHS[] = {
@@ -410,11 +416,18 @@ void tsra_pkcs11_tmpl_append(
     }
 }
 
-CK_RV tsra_pkcs11_keygen_build_template(
+/*
+ * The builder behind tsra_pkcs11_keygen_build_template and
+ * tsra_pkcs11_derive_build_template: `local` sets CKA_LOCAL and
+ * CKA_KEY_GEN_MECHANISM, the other two flags are stored as given.
+ */
+static CK_RV build_template(
     const tsra_pkcs11_keygen_policy *policy,
     const CK_ATTRIBUTE *tmpl,
     CK_ULONG count,
     bool local,
+    CK_BBOOL always_sensitive,
+    CK_BBOOL never_extractable,
     tsra_pkcs11_keygen_fill *fill,
     CK_ATTRIBUTE *full,
     CK_ULONG *n
@@ -422,7 +435,8 @@ CK_RV tsra_pkcs11_keygen_build_template(
 {
     if ((policy == NULL) || (fill == NULL) || (full == NULL) || (n == NULL) ||
         ((tmpl == NULL) && (count > 0)) || (policy->mech_count == 0) ||
-        (policy->mech_count > KEYGEN_MAX_KEY_MECHS))
+        (policy->mech_count > KEYGEN_MAX_KEY_MECHS) ||
+        (policy->usage_count > KEYGEN_MAX_KEY_USAGES))
     {
         return CKR_ARGUMENTS_BAD;
     }
@@ -481,29 +495,66 @@ CK_RV tsra_pkcs11_keygen_build_template(
         count,
         (CK_ATTRIBUTE){ CKA_EXTRACTABLE, &fill->bfalse, sizeof(fill->bfalse) }
     );
-    tsra_pkcs11_tmpl_append(
-        full,
-        &k,
-        tmpl,
-        count,
-        (CK_ATTRIBUTE){ CKA_ENCRYPT, &fill->btrue, sizeof(fill->btrue) }
-    );
-    tsra_pkcs11_tmpl_append(
-        full,
-        &k,
-        tmpl,
-        count,
-        (CK_ATTRIBUTE){ CKA_DECRYPT, &fill->btrue, sizeof(fill->btrue) }
-    );
-    /* Rejected by the check as inputs, so always appended. A key that came
-     * from outside the token has been neither local nor always protected. */
-    CK_BBOOL *origin = local ? &fill->btrue : &fill->bfalse;
-    full[k++] = (CK_ATTRIBUTE){ CKA_LOCAL, origin, sizeof(*origin) };
-    full[k++] = (CK_ATTRIBUTE){ CKA_ALWAYS_SENSITIVE, origin, sizeof(*origin) };
-    full[k++] = (CK_ATTRIBUTE){ CKA_NEVER_EXTRACTABLE, origin, sizeof(*origin) };
+    for (CK_ULONG i = 0; i < policy->usage_count; i++)
+    {
+        tsra_pkcs11_tmpl_append(
+            full,
+            &k,
+            tmpl,
+            count,
+            (CK_ATTRIBUTE){ policy->usages[i], &fill->btrue, sizeof(fill->btrue) }
+        );
+    }
+    /* Rejected by the checks as inputs, so always appended. */
+    CK_BBOOL *is_local = local ? &fill->btrue : &fill->bfalse;
+    CK_BBOOL *was_sensitive = always_sensitive ? &fill->btrue : &fill->bfalse;
+    CK_BBOOL *was_kept = never_extractable ? &fill->btrue : &fill->bfalse;
+    full[k++] = (CK_ATTRIBUTE){ CKA_LOCAL, is_local, sizeof(*is_local) };
+    full[k++] = (CK_ATTRIBUTE){ CKA_ALWAYS_SENSITIVE, was_sensitive, sizeof(*was_sensitive) };
+    full[k++] = (CK_ATTRIBUTE){ CKA_NEVER_EXTRACTABLE, was_kept, sizeof(*was_kept) };
     full[k++] = (CK_ATTRIBUTE){ CKA_KEY_GEN_MECHANISM, &fill->kgm, sizeof(fill->kgm) };
     *n = k;
     return CKR_OK;
+}
+
+CK_RV tsra_pkcs11_keygen_build_template(
+    const tsra_pkcs11_keygen_policy *policy,
+    const CK_ATTRIBUTE *tmpl,
+    CK_ULONG count,
+    bool local,
+    tsra_pkcs11_keygen_fill *fill,
+    CK_ATTRIBUTE *full,
+    CK_ULONG *n
+)
+{
+    /* A key that came from outside the token has been neither local nor
+     * always protected. */
+    CK_BBOOL origin = local ? CK_TRUE : CK_FALSE;
+    return build_template(policy, tmpl, count, local, origin, origin, fill, full, n);
+}
+
+CK_RV tsra_pkcs11_derive_build_template(
+    const tsra_pkcs11_keygen_policy *policy,
+    const CK_ATTRIBUTE *tmpl,
+    CK_ULONG count,
+    CK_BBOOL always_sensitive,
+    CK_BBOOL never_extractable,
+    tsra_pkcs11_keygen_fill *fill,
+    CK_ATTRIBUTE *full,
+    CK_ULONG *n
+)
+{
+    return build_template(
+        policy,
+        tmpl,
+        count,
+        false,
+        always_sensitive,
+        never_extractable,
+        fill,
+        full,
+        n
+    );
 }
 
 tsra_pkcs11_key_scope_t tsra_pkcs11_key_scope_props(CK_BBOOL ck_token, CK_BBOOL ck_private)

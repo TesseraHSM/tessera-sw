@@ -89,6 +89,7 @@ set(SOURCE
     unwrap/pair_tests.cpp
     unwrap/unwrap_tests.cpp
     unwrap/kat_tests.cpp
+    derive/derive_tests.cpp
 )
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -97,6 +98,7 @@ set(WYCHEPROOF_INC
     ${WYCHEPROOF_OUT}/aes_kwp.inc
     ${WYCHEPROOF_OUT}/aes_cbc_pkcs5.inc
     ${WYCHEPROOF_OUT}/aes_gcm.inc
+    ${WYCHEPROOF_OUT}/ecdh_ecpoint.inc
 )
 add_custom_command(
     OUTPUT ${WYCHEPROOF_INC}
@@ -107,6 +109,9 @@ add_custom_command(
         ${WYCHEPROOF_VECTORS}/aes_kwp_test.json
         ${WYCHEPROOF_VECTORS}/aes_cbc_pkcs5_test.json
         ${WYCHEPROOF_VECTORS}/aes_gcm_test.json
+        ${WYCHEPROOF_VECTORS}/ecdh_secp256r1_ecpoint_test.json
+        ${WYCHEPROOF_VECTORS}/ecdh_secp384r1_ecpoint_test.json
+        ${WYCHEPROOF_VECTORS}/ecdh_secp521r1_ecpoint_test.json
     COMMENT "Converting the Wycheproof vectors"
     VERBATIM
 )

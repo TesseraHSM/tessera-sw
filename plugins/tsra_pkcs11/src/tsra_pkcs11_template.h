@@ -33,10 +33,10 @@ extern "C"
 /*
  * Attributes tsra_pkcs11_keygen_build_template appends to the caller's
  * template: CKA_CLASS, CKA_KEY_TYPE, CKA_PRIVATE, CKA_SENSITIVE,
- * CKA_EXTRACTABLE, CKA_ENCRYPT, CKA_DECRYPT, CKA_ALLOWED_MECHANISMS (each only
- * if absent), plus CKA_LOCAL, CKA_ALWAYS_SENSITIVE, CKA_NEVER_EXTRACTABLE and
- * CKA_KEY_GEN_MECHANISM (always). Bounds the headroom the caller must reserve
- * in the output array.
+ * CKA_EXTRACTABLE, CKA_ALLOWED_MECHANISMS and the family's usages (at most
+ * KEYGEN_MAX_KEY_USAGES; each only if absent), plus CKA_LOCAL,
+ * CKA_ALWAYS_SENSITIVE, CKA_NEVER_EXTRACTABLE and CKA_KEY_GEN_MECHANISM
+ * (always). Bounds the headroom the caller must reserve in the output array.
  */
 #define KEYGEN_APPENDED_ATTRS 12
 
@@ -51,8 +51,12 @@ extern "C"
 /* Most mechanisms one generated key may serve (the CBC family has two). */
 #define KEYGEN_MAX_KEY_MECHS 2
 
+/* Most usages a device key has: encrypt and decrypt, or sign and verify. */
+#define KEYGEN_MAX_KEY_USAGES 2
+
 /*
- * What C_GenerateKey produces for one family of keys. The device has three
+ * What C_GenerateKey produces for one family of keys (C_DeriveKey has
+ * families of its own, in tsra_pkcs11_derive_params.c). The device has three
  * disjoint AES key kinds while PKCS#11 has CKK_AES and CKK_AES_XTS, so:
  *   CKM_AES_XTS_KEY_GEN                            -> AES-XTS, CKK_AES_XTS, 64
  *   CKM_AES_KEY_GEN + CKA_ALLOWED_MECHANISMS {GCM} -> AES-GCM, CKK_AES, 32
@@ -68,6 +72,8 @@ typedef struct
     CK_ULONG value_lens[4];                        /* accepted CKA_VALUE_LEN, 0-terminated */
     CK_MECHANISM_TYPE mechs[KEYGEN_MAX_KEY_MECHS]; /* the family */
     CK_ULONG mech_count;
+    CK_ATTRIBUTE_TYPE usages[KEYGEN_MAX_KEY_USAGES]; /* the device key's, TRUE by default */
+    CK_ULONG usage_count;
 } tsra_pkcs11_keygen_policy;
 
 /* First attribute of type `t` in `tmpl`, or NULL. A NULL `tmpl` yields NULL
@@ -167,19 +173,40 @@ typedef struct
  * key-protection reality, CKA_LOCAL and CKA_KEY_GEN_MECHANISM say how the key
  * came to be (an unwrapped key is not local, and neither always sensitive nor
  * never extractable, as PKCS#11 has it), a key is private unless the caller
- * says otherwise, and the usage defaults make an attribute-less template
- * usable. A caller's own CKA_ALLOWED_MECHANISMS (already checked to lie within
- * the family) is kept as the narrower list. `full` must have room for count +
+ * says otherwise, and the family's usages (CKA_ENCRYPT and CKA_DECRYPT for
+ * AES) default to TRUE so an attribute-less template is usable. A caller's
+ * own CKA_ALLOWED_MECHANISMS (already checked to lie within the family) is
+ * kept as the narrower list. `full` must have room for count +
  * KEYGEN_APPENDED_ATTRS entries; *n receives the number written. `tmpl` is
  * expected to have passed tsra_pkcs11_keygen_check_template.
  * CKR_ARGUMENTS_BAD for NULL policy/fill/full/n, a NULL tmpl with count > 0,
- * or a policy whose mech_count is 0 or above KEYGEN_MAX_KEY_MECHS.
+ * or a policy whose mech_count is 0 or above KEYGEN_MAX_KEY_MECHS, or whose
+ * usage_count is above KEYGEN_MAX_KEY_USAGES.
  */
 CK_RV tsra_pkcs11_keygen_build_template(
     const tsra_pkcs11_keygen_policy *policy,
     const CK_ATTRIBUTE *tmpl,
     CK_ULONG count,
     bool local,
+    tsra_pkcs11_keygen_fill *fill,
+    CK_ATTRIBUTE *full,
+    CK_ULONG *n
+);
+
+/*
+ * The template C_DeriveKey stores, built as tsra_pkcs11_keygen_build_template
+ * builds an unwrapped key's, except that CKA_ALWAYS_SENSITIVE and
+ * CKA_NEVER_EXTRACTABLE are the base key's: PKCS#11 carries them over to a
+ * derived key that is sensitive and unextractable, as every key here is. The
+ * family's usages and CKA_ALLOWED_MECHANISMS come from `policy` as there. Same
+ * arguments, room and CKR_ARGUMENTS_BAD cases.
+ */
+CK_RV tsra_pkcs11_derive_build_template(
+    const tsra_pkcs11_keygen_policy *policy,
+    const CK_ATTRIBUTE *tmpl,
+    CK_ULONG count,
+    CK_BBOOL always_sensitive,
+    CK_BBOOL never_extractable,
     tsra_pkcs11_keygen_fill *fill,
     CK_ATTRIBUTE *full,
     CK_ULONG *n

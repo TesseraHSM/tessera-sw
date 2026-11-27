@@ -1108,6 +1108,230 @@ void tsra_pkcs11_key_sign_stream_free(uint32_t ctx)
     }
 }
 
+/* Every masked scope a key call takes; anything else is a caller error. */
+static bool scope_ok(tsra_pkcs11_key_scope_t scope)
+{
+    return (scope == TSRA_PKCS11_SCOPE_PARTITION) || (scope == TSRA_PKCS11_SCOPE_SESSION);
+}
+
+CK_RV tsra_pkcs11_key_ecdh(
+    uint32_t hsm_session,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    tsra_pkcs11_ec_curve_t curve,
+    const CK_BYTE *peer,
+    CK_ULONG peer_len,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+)
+{
+    CK_ULONG bits = tsra_pkcs11_ec_curve_bits(curve);
+    if ((out_blob == NULL) || (out_blob_len == NULL) || (peer == NULL) || (peer_len == 0) ||
+        (peer_len > (CK_ULONG)UINT32_MAX) || (bits == 0) || !scope_ok(scope))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    *out_blob = NULL;
+    *out_blob_len = 0;
+    uint32_t priv = 0;
+    uint32_t pub = 0;
+    tsra_pkcs11_ec_curve_t dev_curve = TSRA_PKCS11_CURVE_NONE;
+    CK_RV rv = tsra_pkcs11_key_ec_unmask(hsm_session, blob, blob_len, &priv, &pub, &dev_curve);
+    if (rv != CKR_OK)
+    {
+        return rv;
+    }
+    if (dev_curve != curve)
+    {
+        /* The peer point was checked against the object's CKA_EC_PARAMS. */
+        TSRA_PKCS11_LOG(
+            "ECDH: the key is on curve %d, its object names %d",
+            (int)dev_curve,
+            (int)curve
+        );
+        rv = CKR_KEY_HANDLE_INVALID;
+        goto cleanup;
+    }
+
+    /* The SDK takes only this shape for an ECDH secret: a shared-secret key as
+     * long as the curve that only derives (api/lib HsmGenericSecretKey). */
+    uint32_t cls = TSRA_KEY_CLASS_SECRET;
+    uint32_t kind = TSRA_KEY_KIND_SHARED_SECRET;
+    uint32_t bit_len = (uint32_t)bits; /* at most EC_P521_BITS (tsra_pkcs11_ec_curve_bits) */
+    uint8_t yes = 1;
+    uint8_t session = (scope == TSRA_PKCS11_SCOPE_SESSION) ? 1 : 0;
+    struct tsra_key_prop props[] = {
+        { TSRA_KEY_PROP_ID_CLASS, &cls, sizeof(cls) },
+        { TSRA_KEY_PROP_ID_KIND, &kind, sizeof(kind) },
+        { TSRA_KEY_PROP_ID_BIT_LEN, &bit_len, sizeof(bit_len) },
+        { TSRA_KEY_PROP_ID_SESSION, &session, sizeof(session) },
+        { TSRA_KEY_PROP_ID_DERIVE, &yes, sizeof(yes) },
+    };
+    struct tsra_key_prop_list list = { props, sizeof(props) / sizeof(props[0]) };
+    struct tsra_buffer peer_buf = { (void *)peer, (uint32_t)peer_len };
+    struct tsra_algo_ecdh_params params = { &peer_buf };
+    struct tsra_algo algo = { TSRA_ALGO_ID_ECDH, &params, sizeof(params) };
+    tsra_handle secret = 0;
+    tsra_status st = tsra_key_derive(hsm_session, &algo, priv, &list, &secret);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("key_derive(ECDH, curve %d) failed: %d", (int)curve, (int)st);
+        /* INVALID_KEY here is the SDK refusing the peer key, a point that is
+         * not on the curve: the base key's curve is checked above and its
+         * derive usage by the object policy, the other two causes. */
+        rv = (st == TSRA_STATUS_INVALID_KEY)
+                 ? CKR_MECHANISM_PARAM_INVALID
+                 : tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_KEY_HANDLE_INVALID);
+        goto cleanup;
+    }
+    rv = get_prop_alloc(secret, TSRA_KEY_PROP_ID_MASKED_KEY, out_blob, out_blob_len);
+    (void)tsra_key_delete(secret);
+
+cleanup:
+    tsra_pkcs11_key_release(priv);
+    tsra_pkcs11_key_release(pub);
+    return rv;
+}
+
+/*
+ * The device kind and the two usages (which the SDK requires both of) of a
+ * key HKDF derives; false for a kind it does not derive into. The SDK's AES
+ * output is the CBC kind only (api/lib HsmGenericSecretKey).
+ */
+static bool hkdf_target(
+    tsra_pkcs11_key_kind_t kind,
+    uint32_t *dev_kind,
+    uint32_t *use_a,
+    uint32_t *use_b
+)
+{
+    *use_a = TSRA_KEY_PROP_ID_SIGN;
+    *use_b = TSRA_KEY_PROP_ID_VERIFY;
+    switch (kind)
+    {
+    case TSRA_PKCS11_KIND_AES:
+        *dev_kind = TSRA_KEY_KIND_AES;
+        *use_a = TSRA_KEY_PROP_ID_ENCRYPT;
+        *use_b = TSRA_KEY_PROP_ID_DECRYPT;
+        return true;
+    case TSRA_PKCS11_KIND_HMAC_SHA256:
+        *dev_kind = TSRA_KEY_KIND_HMAC_SHA256;
+        return true;
+    case TSRA_PKCS11_KIND_HMAC_SHA384:
+        *dev_kind = TSRA_KEY_KIND_HMAC_SHA384;
+        return true;
+    case TSRA_PKCS11_KIND_HMAC_SHA512:
+        *dev_kind = TSRA_KEY_KIND_HMAC_SHA512;
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* The SDK's HMAC for an HKDF PRF tsra_pkcs11_derive_params_check accepted;
+ * false for any other. */
+static bool hkdf_prf(CK_MECHANISM_TYPE prf, uint32_t *out)
+{
+    switch (prf)
+    {
+    case CKM_SHA256:
+        *out = TSRA_ALGO_ID_HMAC_SHA256;
+        return true;
+    case CKM_SHA384:
+        *out = TSRA_ALGO_ID_HMAC_SHA384;
+        return true;
+    case CKM_SHA512:
+        *out = TSRA_ALGO_ID_HMAC_SHA512;
+        return true;
+    default:
+        return false;
+    }
+}
+
+CK_RV tsra_pkcs11_key_hkdf(
+    uint32_t hsm_session,
+    const CK_BYTE *secret,
+    CK_ULONG secret_len,
+    CK_MECHANISM_TYPE prf,
+    const CK_BYTE *salt,
+    CK_ULONG salt_len,
+    const CK_BYTE *info,
+    CK_ULONG info_len,
+    tsra_pkcs11_key_kind_t kind,
+    uint32_t bit_len,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+)
+{
+    uint32_t dev_kind = 0;
+    uint32_t use_a = 0;
+    uint32_t use_b = 0;
+    uint32_t hmac = 0;
+    if ((out_blob == NULL) || (out_blob_len == NULL) || (secret == NULL) || (secret_len == 0) ||
+        (secret_len > (CK_ULONG)UINT32_MAX) || ((salt == NULL) && (salt_len > 0)) ||
+        ((info == NULL) && (info_len > 0)) || (salt_len > (CK_ULONG)UINT32_MAX) ||
+        (info_len > (CK_ULONG)UINT32_MAX) || !scope_ok(scope) ||
+        !hkdf_target(kind, &dev_kind, &use_a, &use_b) || !hkdf_prf(prf, &hmac))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    *out_blob = NULL;
+    *out_blob_len = 0;
+    struct tsra_buffer masked = { (void *)secret, (uint32_t)secret_len };
+    tsra_handle base = 0;
+    tsra_status st = tsra_key_unmask(hsm_session, TSRA_KEY_KIND_SHARED_SECRET, &masked, &base);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("key_unmask(shared secret) failed: %d", (int)st);
+        /* As for AES: the only handle passed is the device session. */
+        return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_USER_NOT_LOGGED_IN);
+    }
+
+    uint32_t cls = TSRA_KEY_CLASS_SECRET;
+    uint8_t yes = 1;
+    uint8_t session = (scope == TSRA_PKCS11_SCOPE_SESSION) ? 1 : 0;
+    struct tsra_key_prop props[] = {
+        { TSRA_KEY_PROP_ID_CLASS, &cls, sizeof(cls) },
+        { TSRA_KEY_PROP_ID_KIND, &dev_kind, sizeof(dev_kind) },
+        { TSRA_KEY_PROP_ID_BIT_LEN, &bit_len, sizeof(bit_len) },
+        { TSRA_KEY_PROP_ID_SESSION, &session, sizeof(session) },
+        { use_a, &yes, sizeof(yes) },
+        { use_b, &yes, sizeof(yes) },
+    };
+    struct tsra_key_prop_list list = { props, sizeof(props) / sizeof(props[0]) };
+    /* None rather than empty: HKDF reads an absent salt as hash-length zeros,
+     * which key HMAC exactly as an empty one does, and an absent info as an
+     * empty one (RFC 5869). */
+    struct tsra_buffer salt_buf = { (void *)salt, (uint32_t)salt_len };
+    struct tsra_buffer info_buf = { (void *)info, (uint32_t)info_len };
+    struct tsra_algo_hkdf_params params = { hmac,
+                                            (salt_len > 0) ? &salt_buf : NULL,
+                                            (info_len > 0) ? &info_buf : NULL };
+    struct tsra_algo algo = { TSRA_ALGO_ID_HKDF_DERIVE, &params, sizeof(params) };
+    tsra_handle key = 0;
+    st = tsra_key_derive(hsm_session, &algo, base, &list, &key);
+    CK_RV rv = CKR_OK;
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG(
+            "key_derive(HKDF, kind %u, %u bits) failed: %d",
+            dev_kind,
+            bit_len,
+            (int)st
+        );
+        rv = tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_KEY_HANDLE_INVALID);
+    }
+    else
+    {
+        rv = get_prop_alloc(key, TSRA_KEY_PROP_ID_MASKED_KEY, out_blob, out_blob_len);
+        (void)tsra_key_delete(key);
+    }
+    tsra_pkcs11_key_release(base);
+    return rv;
+}
+
 #else /* !TSRA_WITH_HSM ---------------------------------------------------- */
 
 /* No device linked: key material cannot exist, so the key-backed paths report
@@ -1432,6 +1656,62 @@ CK_RV tsra_pkcs11_key_verify_stream_final(uint32_t ctx, const CK_BYTE *sig, CK_U
 void tsra_pkcs11_key_sign_stream_free(uint32_t ctx)
 {
     (void)ctx; /* no context can exist without a device */
+}
+
+CK_RV tsra_pkcs11_key_ecdh(
+    uint32_t hsm_session,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    tsra_pkcs11_ec_curve_t curve,
+    const CK_BYTE *peer,
+    CK_ULONG peer_len,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+)
+{
+    (void)hsm_session;
+    (void)blob;
+    (void)blob_len;
+    (void)curve;
+    (void)peer;
+    (void)peer_len;
+    (void)scope;
+    (void)out_blob;
+    (void)out_blob_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV tsra_pkcs11_key_hkdf(
+    uint32_t hsm_session,
+    const CK_BYTE *secret,
+    CK_ULONG secret_len,
+    CK_MECHANISM_TYPE prf,
+    const CK_BYTE *salt,
+    CK_ULONG salt_len,
+    const CK_BYTE *info,
+    CK_ULONG info_len,
+    tsra_pkcs11_key_kind_t kind,
+    uint32_t bit_len,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+)
+{
+    (void)hsm_session;
+    (void)secret;
+    (void)secret_len;
+    (void)prf;
+    (void)salt;
+    (void)salt_len;
+    (void)info;
+    (void)info_len;
+    (void)kind;
+    (void)bit_len;
+    (void)scope;
+    (void)out_blob;
+    (void)out_blob_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
 }
 
 #endif /* TSRA_WITH_HSM */

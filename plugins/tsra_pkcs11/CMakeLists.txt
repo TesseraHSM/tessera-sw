@@ -78,6 +78,8 @@ set(TSRA_PKCS11_SOURCES
     ./src/tsra_pkcs11_ec_template.c
     ./src/tsra_pkcs11_unwrap.c
     ./src/tsra_pkcs11_unwrap_params.c
+    ./src/tsra_pkcs11_derive.c
+    ./src/tsra_pkcs11_derive_params.c
     ./src/tsra_pkcs11_stubs.c
 )
 

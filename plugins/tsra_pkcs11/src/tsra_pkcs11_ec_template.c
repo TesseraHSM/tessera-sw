@@ -11,6 +11,7 @@
 #include "tsra_pkcs11_template.h"
 
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 /* DER tags this file reads or writes. */
@@ -21,8 +22,10 @@
 #define DER_LONG_FORM 0x80
 /* The most length bytes read: every length here is below 64 KiB. */
 #define DER_MAX_LEN_BYTES 2
-/* The first byte of an uncompressed point (SEC 1). */
-#define EC_POINT_UNCOMPRESSED 0x04
+/* A DER header written here: the tag and one length byte, and a second length
+ * byte in the long form. */
+#define DER_HEADER_SHORT 2
+#define DER_HEADER_LONG 3
 
 /* The DER named-curve OIDs (RFC 5480): CKA_EC_PARAMS and the curve in the
  * device's public key info. */
@@ -38,13 +41,21 @@ typedef struct
     const CK_BYTE *oid;
     CK_ULONG oid_len;
     CK_ULONG coord_len;
+    CK_ULONG bits;
 } curve_info;
 
 static const curve_info CURVES[] = {
-    { TSRA_PKCS11_CURVE_P256, OID_P256, sizeof(OID_P256), 32 },
-    { TSRA_PKCS11_CURVE_P384, OID_P384, sizeof(OID_P384), 48 },
-    { TSRA_PKCS11_CURVE_P521, OID_P521, sizeof(OID_P521), 66 },
+    { TSRA_PKCS11_CURVE_P256, OID_P256, sizeof(OID_P256), 32, EC_P256_BITS },
+    { TSRA_PKCS11_CURVE_P384, OID_P384, sizeof(OID_P384), 48, EC_P384_BITS },
+    { TSRA_PKCS11_CURVE_P521, OID_P521, sizeof(OID_P521), 66, EC_P521_BITS },
 };
+
+_Static_assert(
+    (sizeof(OID_P256) <= EC_PARAMS_DER_MAX) && (sizeof(OID_P384) <= EC_PARAMS_DER_MAX) &&
+        (sizeof(OID_P521) <= EC_PARAMS_DER_MAX),
+    "EC_PARAMS_DER_MAX holds every curve OID"
+);
+_Static_assert(sizeof(OID_EC_PUBLIC_KEY) == 9, "EC_SPKI_DER_MAX counts a 9-byte algorithm OID");
 
 static const curve_info *find_curve(tsra_pkcs11_ec_curve_t curve)
 {
@@ -143,6 +154,114 @@ CK_ULONG tsra_pkcs11_ec_coord_len(tsra_pkcs11_ec_curve_t curve)
     return (c != NULL) ? c->coord_len : 0;
 }
 
+/* The length of an uncompressed point on `c`: EC_POINT_UNCOMPRESSED, then both
+ * coordinates. Without a curve it is 0, a length no point has; the callers
+ * refuse a missing curve before they get here. */
+static CK_ULONG uncompressed_len(const curve_info *c)
+{
+    return (c != NULL) ? (1 + (2 * c->coord_len)) : 0;
+}
+
+bool tsra_pkcs11_ec_point_from_der(
+    const void *value,
+    CK_ULONG len,
+    tsra_pkcs11_ec_curve_t curve,
+    const CK_BYTE **point
+)
+{
+    const curve_info *c = find_curve(curve);
+    if ((value == NULL) || (c == NULL) || (point == NULL))
+    {
+        return false;
+    }
+    const CK_BYTE *p = (const CK_BYTE *)value;
+    const CK_BYTE *end = p + len;
+    CK_BYTE tag = 0;
+    const CK_BYTE *inner = NULL;
+    CK_ULONG inner_len = 0;
+    if (!der_next(&p, end, &tag, &inner, &inner_len) || (tag != DER_OCTET_STRING) || (p != end) ||
+        (inner_len != uncompressed_len(c)) || (inner[0] != EC_POINT_UNCOMPRESSED))
+    {
+        return false;
+    }
+    *point = inner;
+    return true;
+}
+
+CK_RV tsra_pkcs11_ec_point_check(const void *value, CK_ULONG len, tsra_pkcs11_ec_curve_t curve)
+{
+    const CK_BYTE *point = NULL;
+    return tsra_pkcs11_ec_point_from_der(value, len, curve, &point) ? CKR_OK
+                                                                    : CKR_ATTRIBUTE_VALUE_INVALID;
+}
+
+CK_ULONG tsra_pkcs11_ec_curve_bits(tsra_pkcs11_ec_curve_t curve)
+{
+    const curve_info *c = find_curve(curve);
+    return (c != NULL) ? c->bits : 0;
+}
+
+/*
+ * Write the DER header of an element of `tag` with `len` content bytes at `p`
+ * and return its length. Every length here is below 256 (EC_SPKI_DER_MAX), so
+ * the long form takes one length byte.
+ */
+static CK_ULONG der_header(CK_BYTE *p, CK_BYTE tag, CK_ULONG len)
+{
+    CK_ULONG h = 0;
+    p[h++] = tag;
+    if (len >= DER_LONG_FORM)
+    {
+        p[h++] = DER_LONG_FORM | 1;
+    }
+    p[h++] = (CK_BYTE)len;
+    return h;
+}
+
+_Static_assert(EC_SPKI_DER_MAX <= UINT8_MAX, "der_header writes one length byte");
+
+/* The length of a DER element with `len` content bytes, header included. */
+static CK_ULONG der_size(CK_ULONG len)
+{
+    return ((len >= DER_LONG_FORM) ? DER_HEADER_LONG : DER_HEADER_SHORT) + len;
+}
+
+CK_RV tsra_pkcs11_ec_spki_from_point(
+    tsra_pkcs11_ec_curve_t curve,
+    const CK_BYTE *point,
+    CK_ULONG point_len,
+    CK_BYTE *out,
+    CK_ULONG *out_len
+)
+{
+    const curve_info *c = find_curve(curve);
+    if ((point == NULL) || (out == NULL) || (out_len == NULL) || (c == NULL) ||
+        (point_len != uncompressed_len(c)) || (point[0] != EC_POINT_UNCOMPRESSED))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    /* SEQUENCE { SEQUENCE { id-ecPublicKey, curve }, BIT STRING { 0, point } } */
+    CK_ULONG alg_len = sizeof(OID_EC_PUBLIC_KEY) + c->oid_len;
+    CK_ULONG bits_len = 1 + point_len;
+    CK_ULONG seq_len = der_size(alg_len) + der_size(bits_len);
+    if (*out_len < der_size(seq_len))
+    {
+        *out_len = der_size(seq_len);
+        return CKR_BUFFER_TOO_SMALL;
+    }
+    CK_ULONG k = der_header(out, DER_SEQUENCE, seq_len);
+    k += der_header(out + k, DER_SEQUENCE, alg_len);
+    memcpy(out + k, OID_EC_PUBLIC_KEY, sizeof(OID_EC_PUBLIC_KEY));
+    k += sizeof(OID_EC_PUBLIC_KEY);
+    memcpy(out + k, c->oid, c->oid_len);
+    k += c->oid_len;
+    k += der_header(out + k, DER_BIT_STRING, bits_len);
+    out[k++] = 0; /* no unused bits */
+    memcpy(out + k, point, point_len);
+    *out_len = k + point_len;
+    return CKR_OK;
+}
+
 CK_RV tsra_pkcs11_ec_point_from_spki(
     const CK_BYTE *spki,
     CK_ULONG spki_len,
@@ -179,7 +298,7 @@ CK_RV tsra_pkcs11_ec_point_from_spki(
     {
         return CKR_DEVICE_ERROR;
     }
-    CK_ULONG point_len = 1 + (2 * c->coord_len);
+    CK_ULONG point_len = uncompressed_len(c);
     if (!der_next(&p, end, &tag, &bits, &bits_len) || (tag != DER_BIT_STRING) || (p != end) ||
         (bits_len != (1 + point_len)) || (bits[0] != 0) || (bits[1] != EC_POINT_UNCOMPRESSED))
     {

@@ -4,7 +4,7 @@ A standalone **PKCS#11 (Cryptoki) v3.1** module for the TSRA. It links the
 native C API (`tsra.h`, generated from `api/native`) the same way
 `plugins/ossl_prov` does.
 
-## Status: digests, AES and EC keys, ciphers, ECDSA, key unwrap, host objects
+## Status: digests, AES and EC keys, ciphers, ECDSA, key unwrap, key derivation, host objects
 
 Unimplemented PKCS#11 entry points return `CKR_FUNCTION_NOT_SUPPORTED` (after
 `C_Initialize`; before it every entry point other than `C_Initialize` and the
@@ -16,7 +16,7 @@ the spec requires). Implemented so far:
   login state machine. The "PKCS 11" interface comes in versions 3.1 (the
   default), 3.0 and 2.40 (`C_GetInterfaceList`, `C_GetInterface`), and
   `C_GetFunctionList` returns the 2.40 table.
-  `C_GetMechanismList` reports only the eighteen mechanisms below, and
+  `C_GetMechanismList` reports only the twenty mechanisms below, and
   `C_GetTokenInfo` the real session counts (at most 256 sessions).
 - **`C_Login`**: runs the TSRA provisioning ceremony and opens one device
   session for the token. Provisioning is done lazily: login opens a device
@@ -47,12 +47,20 @@ the spec requires). Implemented so far:
   sets (`CKA_LOCAL`, `CKA_ALWAYS_SENSITIVE`, `CKA_NEVER_EXTRACTABLE`,
   `CKA_KEY_GEN_MECHANISM`, `CKA_UNIQUE_ID`, and `CKA_TRUSTED` TRUE, which is
   the Security Officer's: `CKR_ATTRIBUTE_READ_ONLY`).
+  A public key needs `CKA_KEY_TYPE`, an EC one also `CKA_EC_PARAMS` and
+  `CKA_EC_POINT`, an RSA one `CKA_MODULUS` and `CKA_PUBLIC_EXPONENT`
+  (`CKR_TEMPLATE_INCOMPLETE`), none of them empty
+  (`CKR_ATTRIBUTE_VALUE_INVALID`). The curve must be P-256, P-384 or P-521
+  (`CKR_CURVE_NOT_SUPPORTED`) and the point a DER OCTET STRING holding an
+  uncompressed point of that curve's length (`CKR_ATTRIBUTE_VALUE_INVALID`);
+  whether it lies on the curve is not checked.
   `CKA_VALUE` of a sensitive key answers `CKR_ATTRIBUTE_SENSITIVE`.
   `C_SetAttributeValue` changes only the attributes PKCS#11 marks modifiable
   for the object's class (label, ID, dates, usage flags), and applies a
   template all-or-nothing; on keys `CKA_SENSITIVE` can only become TRUE and
-  `CKA_EXTRACTABLE` only FALSE, and an EC key's usage flags stay as generated
-  (see Deviations). `C_DestroyObject` needs a read/write session
+  `CKA_EXTRACTABLE` only FALSE, and the usage flags of an EC key and of a
+  derived generic secret or HMAC key stay as made (see Deviations).
+  `C_DestroyObject` needs a read/write session
   for a token object (`CKR_SESSION_READ_ONLY`) and refuses an object with
   `CKA_DESTROYABLE` FALSE (`CKR_ACTION_PROHIBITED`).
   `C_GetObjectSize` reports the bytes of the attribute values plus the masked
@@ -179,8 +187,30 @@ the spec requires). Implemented so far:
   requires. Private (EC, RSA) key targets are not implemented yet.
 - **`C_WrapKey`** returns `CKR_FUNCTION_NOT_SUPPORTED`: no key ever leaves
   the device.
+- **`C_DeriveKey` (`CKM_ECDH1_DERIVE`, `CKM_HKDF_DERIVE`)**: the two run in
+  sequence. ECDH agrees between the token's EC private key and a peer's
+  public point into a shared secret, a `CKK_GENERIC_SECRET` object as long
+  as the curve's coordinate (32, 48 or 66 bytes) that only derives; HKDF
+  derives from that secret an AES key of the CBC family (`CKA_VALUE_LEN` 16,
+  24 or 32, required) or an HMAC key (`CKK_SHA256_HMAC`, `CKK_SHA384_HMAC`,
+  `CKK_SHA512_HMAC`, as long as its hash). Both keys exist only masked, like
+  every key here; the template needs `CKA_CLASS` and `CKA_KEY_TYPE`
+  (`CKR_TEMPLATE_INCOMPLETE`), and the shapes the device fixes are listed
+  under Deviations. The ECDH base key is an EC private key with `CKA_DERIVE`
+  TRUE, the HKDF base key the ECDH secret: a key of another type or class
+  (the EC public key among them) returns `CKR_KEY_TYPE_INCONSISTENT`, a key
+  without `CKA_DERIVE` or one whose `CKA_ALLOWED_MECHANISMS` lacks the
+  mechanism `CKR_KEY_FUNCTION_NOT_PERMITTED`. The base key's policy, curve and masked
+  blob come from one read of its record. A derived key is sensitive,
+  unextractable and not local, keeps the base key's `CKA_ALWAYS_SENSITIVE`
+  and `CKA_NEVER_EXTRACTABLE`, is private unless a session key's template
+  says otherwise, and records its one family in `CKA_ALLOWED_MECHANISMS`
+  (`CKM_HKDF_DERIVE` for the secret, the HMAC mechanism of an HMAC key's
+  hash, which arrives with HMAC signing). `C_CreateObject` still creates none
+  of these keys (see Deviations). `CKM_SP800_108_COUNTER_KDF` is not
+  offered.
 
-  The other key-backed mechanisms (RSA operations, derive) are not
+  The other key-backed mechanisms (RSA operations, HMAC) are not
   implemented yet.
 - **Ending an operation**: `C_DigestInit`, `C_EncryptInit`,
   `C_DecryptInit`, `C_SignInit` and `C_VerifyInit` with a NULL mechanism end
@@ -224,7 +254,8 @@ the spec requires). Implemented so far:
   `pkcs11-tool` without a `--usage-*` option, get this error. The usage
   stays as generated: `CKA_SIGN`, `CKA_VERIFY` and `CKA_DERIVE` of an EC key
   are read-only (`CKR_ATTRIBUTE_READ_ONLY`), where PKCS#11 lets them change,
-  because the device key keeps the usage it was made with.
+  because the device key keeps the usage it was made with. The same holds
+  for every usage flag of a derived generic secret or HMAC key.
 - **No per-operation login.** The token has no context-specific login
   (`CKU_CONTEXT_SPECIFIC`) that would enforce `CKA_ALWAYS_AUTHENTICATE`, so a
   private-key template with it TRUE returns `CKR_ATTRIBUTE_VALUE_INVALID`.
@@ -264,6 +295,52 @@ the spec requires). Implemented so far:
   the lengths of the two blobs and two zero bytes, each a little-endian
   16-bit value), then one `CKM_RSA_AES_KEY_WRAP` blob for each 32-byte half. A
   single blob of the 64-byte key returns `CKR_WRAPPED_KEY_LEN_RANGE`.
+- **ECDH yields only the curve's whole shared secret.** The SDK runs ECDH
+  without a key derivation function and keeps the result on the device as a
+  secret as long as the curve's coordinate that only derives. So
+  `CK_ECDH1_DERIVE_PARAMS` must name `CKD_NULL` with no shared data, and the
+  public data must be an uncompressed point of the base key's curve, raw or
+  as the DER OCTET STRING `CKA_EC_POINT` holds; anything else, a point off
+  the curve included, returns `CKR_MECHANISM_PARAM_INVALID`. The template
+  asks for `CKO_SECRET_KEY` and `CKK_GENERIC_SECRET` (another key type, or
+  any usage but `CKA_DERIVE` set TRUE, returns `CKR_TEMPLATE_INCONSISTENT`)
+  with `CKA_VALUE_LEN` absent or exactly 32, 48 or 66 bytes for P-256, P-384
+  or P-521 (`CKR_ATTRIBUTE_VALUE_INVALID`). The secret never leaves the
+  device, so a template that asks for it not sensitive or extractable returns
+  `CKR_TEMPLATE_INCONSISTENT` too: OpenSC `pkcs11-tool --derive` asks for
+  that and gets this error. Derive the key you need from the secret on the
+  token with `CKM_HKDF_DERIVE` instead.
+  PKCS#11 also offers KDFs over the secret and truncates it to any
+  `CKA_VALUE_LEN` of any secret key type.
+- **HKDF runs extract and expand together, over SHA-2.** The device runs the
+  whole HKDF of RFC 5869 and nothing else, with the salt as bytes. So
+  `CK_HKDF_PARAMS` needs `bExtract` and `bExpand` TRUE, a salt of type
+  `CKF_HKDF_SALT_NULL` or `CKF_HKDF_SALT_DATA` (not `CKF_HKDF_SALT_KEY`), at
+  most 256 bytes of salt and 256 bytes of info (the device command's limit),
+  and `prfHashMechanism` `CKM_SHA256`, `CKM_SHA384` or `CKM_SHA512`; anything
+  else, `CKM_SHA_1` included, returns `CKR_MECHANISM_PARAM_INVALID`. An empty
+  salt is the same as none. The base key is the ECDH secret only, and the
+  derived key an AES key of the CBC family or an HMAC key; an AES-GCM or
+  AES-XTS key, or a `CKK_GENERIC_SECRET`, returns `CKR_TEMPLATE_INCONSISTENT`.
+  PKCS#11 also allows extract or expand alone, a salt from a key, any digest
+  as the PRF and any key type as the target.
+- **HMAC keys have one key type per hash.** The device fixes the hash when it
+  derives an HMAC key and makes it as long as the hash, so an HMAC key is a
+  `CKK_SHA256_HMAC`, `CKK_SHA384_HMAC` or `CKK_SHA512_HMAC` with
+  `CKA_VALUE_LEN` absent or 32, 48 or 64 (`CKR_ATTRIBUTE_VALUE_INVALID`),
+  signs and verifies only (another usage TRUE returns
+  `CKR_TEMPLATE_INCONSISTENT`), and comes only from `CKM_HKDF_DERIVE`.
+  `CKK_GENERIC_SECRET` is the ECDH secret alone. PKCS#11 HMAC mechanisms
+  also take `CKK_GENERIC_SECRET` keys of any length.
+- **HKDF reads the ECDH secret in the device's byte order.** On API 1.x
+  devices, the only ones the module supports, the firmware hands HKDF the
+  shared secret as it stores it: the x-coordinate least significant byte
+  first and, for P-521, zero-padded to 68 bytes. SP 800-56A and RFC 5869 take
+  the x-coordinate big-endian, as long as the field. So a key the token
+  derives does not match the key an outside peer derives from the same
+  exchange with the same HKDF inputs, and a protocol that needs both sides
+  to agree fails. Keys derived and used on the token are not affected. This
+  lasts until the SDK feeds HKDF the standard secret.
 - **XTS tweaks are 64-bit.** The tweak, read as a little-endian 128-bit
   integer, must be below 2^64 - 1: its upper 8 bytes zero and its lower 8 not
   all 0xFF, so the device can advance it past the data unit. Any other tweak
@@ -373,6 +450,7 @@ secret key, so no clear record can lend them either blob.
 | Object policy | `tsra_pkcs11_attr_types.c`, `tsra_pkcs11_attr_policy.c` | the attribute type table and template ceilings every template entry point uses; what `C_CreateObject` may create and which attributes `C_SetAttributeValue` may change, per class; device-free units of their own |
 | Key operations | `tsra_pkcs11_crypt.c`, `tsra_pkcs11_sign.c`, `tsra_pkcs11_template.c`, `tsra_pkcs11_ec_template.c` | key-backed entry points: operation state and the masked-blob store/unmask flow (CK_RV only); the keygen template validation, key-family choice, cipher and sign mechanism policy, and the EC templates and encodings are device-free units of their own |
 | Key import | `tsra_pkcs11_unwrap.c`, `tsra_pkcs11_unwrap_params.c` | `C_UnwrapKey` and the unwrapping key pair behind `C_GenerateKeyPair`; the mechanism parameters, the unwrap and key pair templates and the public key decoding are a device-free unit of their own |
+| Key derivation | `tsra_pkcs11_derive.c`, `tsra_pkcs11_derive_params.c` | `C_DeriveKey` with ECDH and HKDF; the mechanism parameters, the ECDH peer key, the base key policy and the derived-key templates are a device-free unit of their own |
 | Configuration | `tsra_pkcs11_config.c` | the configuration file and environment, the PIN rules and the owner backup key file; a device-free unit of its own |
 | HSM binding | `tsra_pkcs11_hsm.c`, `tsra_pkcs11_key.c`, `tsra_pkcs11_status.c` | the only code that calls `tsra_*` and maps `tsra_status` to `CK_RV` |
 | Not implemented | `tsra_pkcs11_stubs.c` (generated) | everything else → `CKR_FUNCTION_NOT_SUPPORTED` |
@@ -502,7 +580,10 @@ template verdicts, the curve and point encodings, the raw ECDSA lengths and
 the sign mechanism table), `tests/mech_table_test.c` (the mechanism table
 against the dispatch arms, in both directions), `tests/unwrap_params_test.c`
 (the `CKM_RSA_AES_KEY_WRAP` parameters, the unwrap and key pair templates, the
-blob lengths and the public key decoding), `tests/config_test.c` (the
+blob lengths and the public key decoding), `tests/derive_params_test.c` (the
+ECDH and HKDF parameters, the peer point and the SubjectPublicKeyInfo built
+from it, the base key policy and every derived-key template verdict),
+`tests/config_test.c` (the
 environment configuration, the PIN rules and the owner backup key, built as a
 hardware build) and `tests/config_file_test.c` (the configuration file
 parser). `integration-tests/cpp/` is the functional suite
@@ -516,7 +597,11 @@ and object sizes, the object policy and attribute typing, key survival
 across every event that ends the device session, the unwrapping key pair and
 `C_UnwrapKey`, known-answer tests on keys unwrapped from published vectors
 (NIST CAVP AES-CBC and AES-XTS; the Project Wycheproof AES-CBC-PKCS#7,
-AES-GCM and AES key wrap sets, invalid vectors included), what `C_Logout`
+AES-GCM and AES key wrap sets, invalid vectors included), `C_DeriveKey` from
+a token EC key and a host peer through ECDH and HKDF into AES-CBC keys,
+recomputed by the host oracle (with the HKDF input in the device's byte
+order), and into HMAC keys (their type, length and existence), with the
+Wycheproof ECDH points the token must refuse, what `C_Logout`
 does to session objects, private token objects sealed at rest, the
 configuration at `C_Initialize`, the interface list, and the login rules (each
 login case in a process of its own, because the first login of a process

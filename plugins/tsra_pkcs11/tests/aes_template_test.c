@@ -770,6 +770,13 @@ static void test_build(void)
             CKR_ARGUMENTS_BAD,
         "policy above KEYGEN_MAX_KEY_MECHS -> CKR_ARGUMENTS_BAD"
     );
+    bad = *pol;
+    bad.usage_count = KEYGEN_MAX_KEY_USAGES + 1;
+    CHECK(
+        tsra_pkcs11_keygen_build_template(&bad, NULL, 0, true, &fill, full, &n) ==
+            CKR_ARGUMENTS_BAD,
+        "policy above KEYGEN_MAX_KEY_USAGES -> CKR_ARGUMENTS_BAD"
+    );
 
     /* Empty caller template: every default is appended. */
     CK_OBJECT_CLASS secret = CKO_SECRET_KEY;
