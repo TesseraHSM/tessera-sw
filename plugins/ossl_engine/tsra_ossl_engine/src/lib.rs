@@ -62,6 +62,9 @@ mod derive;
 mod hkdf;
 
 #[cfg(all(target_os = "linux", feature = "engine"))]
+mod hmac;
+
+#[cfg(all(target_os = "linux", feature = "engine"))]
 mod asn1;
 
 #[cfg(all(target_os = "linux", feature = "engine"))]

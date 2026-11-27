@@ -22,7 +22,9 @@
 //!   leave a dangling entry that a reused ENGINE address would later pick
 //!   up).
 //! - [`MethodTable::release`] drops the engine's entries address-only,
-//!   dereferencing nothing — the framework frees the methods itself.
+//!   dereferencing nothing — the framework frees the methods itself. It frees
+//!   only the advertised NIDs' methods, so the owner takes the unadvertised
+//!   ones out with [`MethodTable::take_unadvertised`] and frees them.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -71,9 +73,12 @@ pub(crate) fn take_pending_engine() -> usize {
 /// Builders + per-`(ENGINE, NID)` method table for one method type (see the
 /// module docs). A NID's builder is set by its first registration — one
 /// handler type per NID per process. `nids` is the 'static list the
-/// enumeration branch of the lookup callback advertises.
+/// enumeration branch of the lookup callback advertises; `unadvertised` NIDs
+/// are served on lookup but never enumerated, so OpenSSL never makes the
+/// engine their default (it reaches them only for keys bound to the engine).
 pub(crate) struct MethodTable<M> {
     nids: &'static [c_int],
+    unadvertised: &'static [c_int],
     builders: OnceLock<Mutex<HashMap<c_int, fn() -> EngineResult<*mut M>>>>,
     entries: OnceLock<Mutex<HashMap<(usize, c_int), usize>>>,
 }
@@ -90,8 +95,17 @@ enum Lookup<M> {
 
 impl<M> MethodTable<M> {
     pub(crate) const fn new(nids: &'static [c_int]) -> Self {
+        Self::with_unadvertised(nids, &[])
+    }
+
+    /// A table that also serves `unadvertised` NIDs (see [`MethodTable`]).
+    pub(crate) const fn with_unadvertised(
+        nids: &'static [c_int],
+        unadvertised: &'static [c_int],
+    ) -> Self {
         Self {
             nids,
+            unadvertised,
             builders: OnceLock::new(),
             entries: OnceLock::new(),
         }
@@ -105,6 +119,11 @@ impl<M> MethodTable<M> {
         self.entries.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
+    /// Whether `nid` is served, advertised or not.
+    fn serves(&self, nid: c_int) -> bool {
+        self.nids.contains(&nid) || self.unadvertised.contains(&nid)
+    }
+
     /// Record `builder` for `nid` (first caller wins) and store a freshly
     /// built method as `engine`'s entry, overwriting any stale one. Building
     /// eagerly makes build errors surface at registration.
@@ -114,9 +133,9 @@ impl<M> MethodTable<M> {
         nid: c_int,
         builder: fn() -> EngineResult<*mut M>,
     ) -> EngineResult<()> {
-        if !self.nids.contains(&nid) {
+        if !self.serves(nid) {
             return Err(EngineError::Other(format!(
-                "NID {nid} is not advertised by this method table"
+                "NID {nid} is not served by this method table"
             )));
         }
         let builder = *self.builders().lock().entry(nid).or_insert(builder);
@@ -125,6 +144,18 @@ impl<M> MethodTable<M> {
             .lock()
             .insert((engine.as_ptr() as usize, nid), method);
         Ok(())
+    }
+
+    /// Remove `engine`'s entries for unadvertised NIDs and return their
+    /// methods for the caller to free.
+    pub(crate) fn take_unadvertised(&self, engine: &Engine) -> Vec<*mut M> {
+        let e = engine.as_ptr() as usize;
+        let mut entries = self.entries().lock();
+        self.unadvertised
+            .iter()
+            .filter_map(|nid| entries.remove(&(e, *nid)))
+            .map(|m| m as *mut M)
+            .collect()
     }
 
     /// Drop all of `engine`'s entries (address-only).
@@ -182,7 +213,7 @@ pub(crate) unsafe fn dispatch<M>(
         unsafe { *nids = table.nids.as_ptr() };
         return c_int::try_from(table.nids.len()).unwrap_or(0);
     }
-    let resolved = if table.nids.contains(&nid) {
+    let resolved = if table.serves(nid) {
         table.lookup(e, nid)
     } else {
         None
@@ -259,6 +290,37 @@ mod tests {
             drop(Box::from_raw(stored_b));
             ffi::ENGINE_free(raw_a);
             ffi::ENGINE_free(raw_b);
+        }
+    }
+
+    // take_unadvertised hands out the engine's unadvertised methods once and
+    // leaves its advertised entries in place.
+    #[test]
+    #[allow(unsafe_code)]
+    fn take_unadvertised_returns_only_unadvertised_methods() {
+        static UNADVERTISED: [c_int; 1] = [201];
+        let table: MethodTable<u8> = MethodTable::with_unadvertised(&NIDS, &UNADVERTISED);
+        // SAFETY: a fresh ENGINE, freed below; methods are dummy heap bytes
+        // reclaimed via Box::from_raw.
+        unsafe {
+            let raw = ffi::ENGINE_new();
+            let engine = Engine::from_ptr(NonNull::new(raw).unwrap());
+            table.register(&engine, 101, build).unwrap();
+            table.register(&engine, 201, build).unwrap();
+
+            let Some(Lookup::Stored(unadvertised)) = table.lookup(raw, 201) else {
+                unreachable!("an unadvertised NID must resolve to the stored entry")
+            };
+            assert_eq!(table.take_unadvertised(&engine), vec![unadvertised]);
+            assert!(table.take_unadvertised(&engine).is_empty(), "taken once");
+            let Some(Lookup::Stored(advertised)) = table.lookup(raw, 101) else {
+                unreachable!("the advertised entry must stay stored")
+            };
+
+            table.release(&engine);
+            drop(Box::from_raw(unadvertised));
+            drop(Box::from_raw(advertised));
+            ffi::ENGINE_free(raw);
         }
     }
 }

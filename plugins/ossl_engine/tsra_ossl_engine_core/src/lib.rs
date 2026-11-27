@@ -26,6 +26,8 @@ pub mod exdata;
 #[cfg(all(target_os = "linux", feature = "engine"))]
 pub mod hkdf_method;
 #[cfg(all(target_os = "linux", feature = "engine"))]
+pub mod hmac_method;
+#[cfg(all(target_os = "linux", feature = "engine"))]
 pub mod mem;
 #[cfg(all(target_os = "linux", feature = "engine"))]
 mod method_table;

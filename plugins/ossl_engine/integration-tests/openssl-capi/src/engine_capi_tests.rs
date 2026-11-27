@@ -618,6 +618,161 @@ fn capi_ecdh_ikm(e: *mut ffi::ENGINE, dir: &std::path::Path, tag: &str) -> PathB
     ikm
 }
 
+/// Derive an HMAC key with HKDF (`md`, `bits`) from the masked secret `ikm`
+/// on engine `e`, writing its masked blob to `out`.
+#[allow(unsafe_code)]
+fn capi_hkdf_hmac_key(
+    e: *mut ffi::ENGINE,
+    ikm: &std::path::Path,
+    md: &str,
+    bits: &str,
+    out: &std::path::Path,
+) {
+    let cstr = |s: &str| CString::new(s).unwrap();
+    // SAFETY: standard NID_hkdf derive sequence; all return codes checked and
+    // the ctx freed.
+    unsafe {
+        let ctx = ffi::EVP_PKEY_CTX_new_id(ffi::NID_hkdf as std::ffi::c_int, e);
+        assert!(!ctx.is_null(), "EVP_PKEY_CTX_new_id(NID_hkdf, engine)");
+        assert_eq!(ffi::EVP_PKEY_derive_init(ctx), 1);
+        for (k, v) in [
+            ("md", md),
+            ("tsra.ikm_file", ikm.to_str().unwrap()),
+            ("derived_key_type", "hmac"),
+            ("derived_key_bits", bits),
+            ("output_file", out.to_str().unwrap()),
+        ] {
+            let key = cstr(k);
+            let value = cstr(v);
+            assert_eq!(
+                ffi::EVP_PKEY_CTX_ctrl_str(ctx, key.as_ptr(), value.as_ptr()),
+                1,
+                "HKDF option {k}"
+            );
+        }
+        let mut n = FILE_OUTPUT_SIZE_HINT;
+        let mut hint = vec![0u8; n];
+        assert_eq!(
+            ffi::EVP_PKEY_derive(ctx, hint.as_mut_ptr(), &mut n),
+            1,
+            "HKDF derive"
+        );
+        ffi::EVP_PKEY_CTX_free(ctx);
+    }
+    assert!(out.is_file(), "HMAC key blob not written");
+}
+
+/// MAC `chunks` (one update each) with `pkey` and `md` through
+/// `EVP_DigestSign*` on a NULL-engine context; `None` if any step fails.
+#[allow(unsafe_code)]
+fn capi_hmac(
+    pkey: *mut ffi::EVP_PKEY,
+    md: *const ffi::EVP_MD,
+    chunks: &[&[u8]],
+) -> Option<Vec<u8>> {
+    // SAFETY: the EVP_DigestSign sequence on a live key; ctx freed on every
+    // path.
+    unsafe {
+        let ctx = ffi::EVP_MD_CTX_new();
+        assert!(!ctx.is_null());
+        let mac = (|| {
+            if ffi::EVP_DigestSignInit(ctx, std::ptr::null_mut(), md, std::ptr::null_mut(), pkey)
+                != OSSL_OK
+            {
+                return None;
+            }
+            for chunk in chunks {
+                if ffi::EVP_DigestUpdate(ctx, chunk.as_ptr().cast(), chunk.len()) != OSSL_OK {
+                    return None;
+                }
+            }
+            let mut len = 0usize;
+            if ffi::EVP_DigestSignFinal(ctx, std::ptr::null_mut(), &mut len) != OSSL_OK {
+                return None;
+            }
+            let mut mac = vec![0u8; len];
+            if ffi::EVP_DigestSignFinal(ctx, mac.as_mut_ptr(), &mut len) != OSSL_OK {
+                return None;
+            }
+            mac.truncate(len);
+            Some(mac)
+        })();
+        ffi::EVP_MD_CTX_free(ctx);
+        mac
+    }
+}
+
+/// HMAC over the real C ABI: an HKDF-derived HMAC-SHA256 key loaded through
+/// `ENGINE_load_private_key` MACs through `EVP_DigestSign*`. The MAC repeats
+/// for the same message (also in pieces) and differs for another; SHA-384 and
+/// a 1025-byte message are refused; a software HMAC key computes the RFC 4231
+/// vector with the engine loaded.
+#[test]
+#[serial]
+#[allow(unsafe_code)]
+fn hmac_via_engine_capi() {
+    let engine_so = std::env::var("ENGINE_SO").expect("ENGINE_SO must point to the engine .so");
+    let dir = setup_keymat();
+    let e = open_dynamic_engine(&engine_so);
+    let ikm = capi_ecdh_ikm(e, &dir, "hmac");
+    let blob = dir.join("hmac_key.bin");
+    capi_hkdf_hmac_key(e, &ikm, "SHA256", "256", &blob);
+
+    let uri = CString::new(format!("tsra://{};type=hmac", blob.display())).unwrap();
+    // SAFETY: e is a live, initialized engine; uri is NUL-terminated; the
+    // digest accessors return process-lifetime constants; every key is freed.
+    unsafe {
+        let key = ffi::ENGINE_load_private_key(
+            e,
+            uri.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        assert!(!key.is_null(), "ENGINE_load_private_key(type=hmac)");
+        let sha256 = ffi::EVP_sha256();
+        let msg = b"engine hmac over the capi path";
+        let mac = capi_hmac(key, sha256, &[msg]).expect("HMAC");
+        assert_eq!(mac.len(), 32, "HMAC-SHA256 length");
+        assert_eq!(capi_hmac(key, sha256, &[msg]), Some(mac.clone()), "repeat");
+        assert_eq!(
+            capi_hmac(key, sha256, &[&msg[..7], &msg[7..]]),
+            Some(mac.clone()),
+            "pieces"
+        );
+        assert_ne!(
+            capi_hmac(key, sha256, &[b"another message"]),
+            Some(mac),
+            "another message"
+        );
+        assert_eq!(capi_hmac(key, ffi::EVP_sha384(), &[msg]), None, "SHA-384");
+        assert_eq!(capi_hmac(key, sha256, &[&[0u8; 1025]]), None, "1025 bytes");
+        ffi::EVP_PKEY_free(key);
+
+        let sw_key = b"Jefe";
+        let sw = ffi::EVP_PKEY_new_raw_private_key(
+            ffi::EVP_PKEY_HMAC as std::ffi::c_int,
+            std::ptr::null_mut(),
+            sw_key.as_ptr(),
+            sw_key.len(),
+        );
+        assert!(!sw.is_null(), "software HMAC key");
+        let rfc4231_case2: [u8; 32] = [
+            0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26, 0x08, 0x95,
+            0x75, 0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9,
+            0x64, 0xec, 0x38, 0x43,
+        ];
+        assert_eq!(
+            capi_hmac(sw, sha256, &[b"what do ya want for nothing?"]),
+            Some(rfc4231_case2.to_vec()),
+            "software HMAC (RFC 4231 test case 2)"
+        );
+        ffi::EVP_PKEY_free(sw);
+        ffi::ENGINE_finish(e);
+        ffi::ENGINE_free(e);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Chained ECDH → HKDF through the C ABI: derive a masked shared secret,
 /// then run a NID_hkdf derive on the engine with the blob as IKM, in buffer
 /// and output_file modes.

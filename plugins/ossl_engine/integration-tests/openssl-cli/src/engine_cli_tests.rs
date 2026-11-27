@@ -120,6 +120,12 @@ fn hkdf_via_engine() {
 
 #[test]
 #[serial]
+fn hmac_via_engine() {
+    run_cli_suite("hmac", "testfiles/hmac");
+}
+
+#[test]
+#[serial]
 fn generate_aes_key_via_engine() {
     run_cli_suite("generate_key", "testfiles/generate_key");
 }

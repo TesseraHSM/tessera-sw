@@ -624,10 +624,15 @@ static PKEY_NIDS: [c_int; 4] = [
     ffi::EVP_PKEY_RSA_PSS as c_int,
 ];
 
-/// Per-`(ENGINE, NID)` method table shared by the EC and HKDF pkey methods
+/// Served but not advertised: HMAC reaches the engine only for keys bound to
+/// it (see [`hmac_method`](crate::hmac_method)).
+static UNADVERTISED_PKEY_NIDS: [c_int; 1] = [ffi::EVP_PKEY_HMAC as c_int];
+
+/// Per-`(ENGINE, NID)` method table shared by the engine's pkey methods
 /// (see [`method_table`](crate::method_table) for the ownership rules the
 /// engine framework imposes).
-pub(crate) static ENGINE_METHODS: MethodTable<ffi::EVP_PKEY_METHOD> = MethodTable::new(&PKEY_NIDS);
+pub(crate) static ENGINE_METHODS: MethodTable<ffi::EVP_PKEY_METHOD> =
+    MethodTable::with_unadvertised(&PKEY_NIDS, &UNADVERTISED_PKEY_NIDS);
 
 /// `ENGINE_PKEY_METHS_PTR` callback: NID enumeration and per-ENGINE method
 /// lookup via [`method_table::dispatch`](crate::method_table::dispatch), with
@@ -690,12 +695,20 @@ pub(crate) fn install_pkey_meths_callback(engine: &Engine) -> EngineResult<()> {
     )
 }
 
-/// Drop all of `engine`'s pkey-method entries (address-only, nothing is
-/// dereferenced). Call from the engine's destroy hook, or in tests before
-/// `ENGINE_free`: the framework frees the methods itself during destruction
+/// Free `engine`'s unadvertised (HMAC) method and drop all of its pkey-method
+/// entries (address-only, nothing else is dereferenced). Call from the
+/// engine's destroy hook, or in tests before `ENGINE_free`: the framework
+/// frees the advertised methods itself during destruction
 /// (`engine_pkey_meths_free`), where a released entry makes the callback hand
 /// out a throwaway copy instead.
+#[allow(unsafe_code)]
 pub fn release_pkey_methods(engine: &Engine) {
+    for method in ENGINE_METHODS.take_unadvertised(engine) {
+        // SAFETY: built by EVP_PKEY_meth_new and never freed by the framework,
+        // which frees only enumerated NIDs' methods; every context using it
+        // holds a reference on the engine, so none is left.
+        unsafe { ffi::EVP_PKEY_meth_free(method) };
+    }
     ENGINE_METHODS.release(engine);
 }
 

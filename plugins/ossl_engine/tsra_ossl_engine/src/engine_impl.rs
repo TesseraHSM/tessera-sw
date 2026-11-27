@@ -135,9 +135,11 @@ impl DestroyHandler for TsraDestroy {
         // Unconditional (no-op-safe): if bind failed after registering the
         // methods but before parking EngineData, the table entries and the
         // global ASN1 registration still need cleaning. The framework has
-        // already freed the methods themselves (engine_pkey_(asn1_)meths_free
-        // run before this hook); only stale pointers are dropped here.
+        // already freed the advertised methods (engine_pkey_(asn1_)meths_free
+        // run before this hook); release_pkey_methods frees the unadvertised
+        // HMAC method and drops the stale pointers.
         tsra_ossl_engine_core::pkey_method::release_pkey_methods(engine);
+        tsra_ossl_engine_core::hmac_method::release_hmac_keys(engine);
         tsra_ossl_engine_core::asn1_method::release_ec_asn1_method(engine);
         // The framework never frees engine ciphers: free this ENGINE's copies.
         // SAFETY: the destroy hook runs once the last functional reference on
@@ -264,6 +266,9 @@ fn bind_helper(engine: &mut Engine, id: &CStr) -> EngineResult<()> {
         crate::rsasign::TsraRsaPssSign,
         crate::rsadecrypt::TsraRsaDecrypt,
     >(engine)?;
+    // HMAC on the HSM for keys loaded with type=hmac; other HMAC keys never
+    // reach this method (see tsra_ossl_engine_core::hmac_method).
+    tsra_ossl_engine_core::hmac_method::register_hmac_pkey_method(engine)?;
     // Provider-parity serialization for HSM-backed keys (-text info block,
     // clean export refusal); software EC keys keep the built-in behavior via
     // the ported fallbacks (see tsra_ossl_engine_core::asn1_method).

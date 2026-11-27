@@ -7,7 +7,7 @@
 //! Grammar (mirrors the OpenSSL 3.x provider's STORE):
 //!
 //! ```text
-//! tsra://<masked-key-file-path>;type=<ec|rsa|rsa-pss|aes|aes-gcm|aes-xts>[;bits=<n>]
+//! tsra://<masked-key-file-path>;type=<ec|rsa|rsa-pss|hmac|aes|aes-gcm|aes-xts>[;bits=<n>]
 //! ```
 //!
 //! The identifier is a filesystem path to a masked-key blob; `type=` is
@@ -33,6 +33,8 @@ pub enum KeyType {
     Ec,
     Rsa,
     RsaPss,
+    /// `type=hmac`: an HMAC key of any digest, loaded as an `EVP_PKEY_HMAC`.
+    Hmac,
     Aes(AesKind),
 }
 
@@ -57,6 +59,7 @@ impl FromStr for KeyType {
             "ec" => Ok(KeyType::Ec),
             "rsa" => Ok(KeyType::Rsa),
             "rsa-pss" => Ok(KeyType::RsaPss),
+            "hmac" => Ok(KeyType::Hmac),
             "aes" => Ok(KeyType::Aes(AesKind::Cbc)),
             "aes-gcm" => Ok(KeyType::Aes(AesKind::Gcm)),
             "aes-xts" => Ok(KeyType::Aes(AesKind::Xts)),
@@ -187,6 +190,14 @@ mod tests {
     #[test]
     fn rejects_unknown_type() {
         assert!(parse("tsra://k;type=dsa").is_err());
+    }
+
+    #[test]
+    fn parses_hmac() {
+        let u = parse("tsra://k;type=HMAC").unwrap();
+        assert_eq!(u.key_type, KeyType::Hmac);
+        assert_eq!(u.bits, None);
+        assert!(parse("tsra://k;type=hmac;bits=256").is_err());
     }
 
     #[test]
