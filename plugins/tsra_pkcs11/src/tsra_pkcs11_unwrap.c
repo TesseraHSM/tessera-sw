@@ -3,24 +3,29 @@
 
 /*
  * Key import: C_UnwrapKey with CKM_RSA_AES_KEY_WRAP into AES, AES-GCM and
- * AES-XTS keys, and the partition's RSA unwrapping key pair that it unwraps
- * with, which C_GenerateKeyPair hands out as objects. Unwrap is the only way
- * a key made outside the token enters it; there is no plaintext import and no
- * C_WrapKey, since no key ever leaves the device.
+ * AES-XTS keys and into RSA and EC private keys, and the partition's RSA
+ * unwrapping key pair that it unwraps with, which C_GenerateKeyPair hands out
+ * as objects. Unwrap is the only way a key made outside the token enters it;
+ * there is no plaintext import and no C_WrapKey, since no key ever leaves the
+ * device. A private key comes with its public key as a second object, which
+ * the SDK needs to verify or encrypt with it.
  *
  * The unwrapping key lives on the device for good, so its objects carry no
  * key body: C_UnwrapKey fetches the device key afresh each time and checks
  * that it is still the key the object describes. The pure CK_MECHANISM,
- * template and DER logic is in tsra_pkcs11_unwrap_params.c, the device calls
- * in tsra_pkcs11_key.c.
+ * template and DER logic is in tsra_pkcs11_unwrap_params.c and, for private
+ * keys, tsra_pkcs11_unwrap_private.c; the device calls are in
+ * tsra_pkcs11_key.c.
  */
 
 #include "tsra_pkcs11_internal.h"
 #include "tsra_pkcs11_key.h"
 #include "tsra_pkcs11_unwrap_params.h"
+#include "tsra_pkcs11_unwrap_private.h"
 
 #include <limits.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* What C_UnwrapKey reads of the unwrapping key object. */
 typedef struct
@@ -193,6 +198,116 @@ static CK_RV unwrapping_key_handle(
     return CKR_OK;
 }
 
+/*
+ * The private-key half of C_UnwrapKey, after every check: unwrap the blob
+ * with the device key `dev` into the pair `t` names, and store the private
+ * key (*phKey) and its companion public key, both with the pair's masked
+ * blob, or neither.
+ */
+static CK_RV unwrap_private(
+    tsra_pkcs11_session_t *s,
+    uint32_t dev,
+    const tsra_pkcs11_rsa_aes_params *params,
+    const tsra_pkcs11_private_target *t,
+    const CK_ATTRIBUTE *tmpl,
+    CK_ULONG count,
+    const CK_BYTE *wrapped,
+    CK_ULONG wrapped_len,
+    CK_OBJECT_HANDLE *phKey
+)
+{
+    /* The private key is private unless the template says otherwise (see
+     * tsra_pkcs11_unwrap_private_build); the scope does not depend on it. */
+    CK_BBOOL priv_private = CK_TRUE;
+    (void)tsra_pkcs11_tmpl_bool(tsra_pkcs11_tmpl_find(tmpl, count, CKA_PRIVATE), &priv_private);
+    CK_BYTE *blob = NULL;
+    CK_ULONG blob_len = 0;
+    CK_BYTE *spki = NULL;
+    CK_ULONG spki_len = 0;
+    CK_ATTRIBUTE *priv_full = NULL;
+    CK_ATTRIBUTE *pub_full = NULL;
+    CK_OBJECT_HANDLE pub_handle = CK_INVALID_HANDLE;
+    CK_RV rv = tsra_pkcs11_key_pair_unwrap(
+        dev,
+        params->hash,
+        params->aes_key_bits,
+        t->key_type,
+        t->rsa_bits,
+        t->curve,
+        t->usage,
+        tsra_pkcs11_key_scope_props(t->token, priv_private),
+        wrapped,
+        wrapped_len,
+        &blob,
+        &blob_len,
+        &spki,
+        &spki_len
+    );
+    if (rv != CKR_OK)
+    {
+        goto cleanup;
+    }
+    priv_full = (CK_ATTRIBUTE *)malloc((count + UNWRAP_PRIV_APPENDED_ATTRS) * sizeof(CK_ATTRIBUTE));
+    pub_full = (CK_ATTRIBUTE *)malloc(UNWRAP_PUB_ATTRS * sizeof(CK_ATTRIBUTE));
+    if ((priv_full == NULL) || (pub_full == NULL))
+    {
+        rv = CKR_HOST_MEMORY;
+        goto cleanup;
+    }
+    /* `fill` and `spki` back the built values until the store has copied them. */
+    tsra_pkcs11_private_fill fill;
+    CK_ULONG priv_n = 0;
+    CK_ULONG pub_n = 0;
+    rv = tsra_pkcs11_unwrap_private_build(
+        t,
+        tmpl,
+        count,
+        spki,
+        spki_len,
+        &fill,
+        priv_full,
+        &priv_n,
+        pub_full,
+        &pub_n
+    );
+    if (rv != CKR_OK)
+    {
+        TSRA_PKCS11_LOG("C_UnwrapKey: the device's public key info is not the key unwrapped");
+        goto cleanup;
+    }
+    /* Both objects carry the pair's masked blob, as a generated pair's do:
+     * the SDK verifies and encrypts only with a device handle. */
+    rv = tsra_pkcs11_store_key(s, pub_full, pub_n, t->token, blob, blob_len, &pub_handle);
+    if (rv != CKR_OK)
+    {
+        goto cleanup;
+    }
+    rv = tsra_pkcs11_store_key(s, priv_full, priv_n, t->token, blob, blob_len, phKey);
+    if (rv != CKR_OK)
+    {
+        tsra_pkcs11_discard_key(s, pub_handle);
+        goto cleanup;
+    }
+    TSRA_PKCS11_LOG(
+        "C_UnwrapKey: key type %lu, priv=%lu pub=%lu (blob %lu bytes)",
+        (unsigned long)t->key_type,
+        (unsigned long)*phKey,
+        (unsigned long)pub_handle,
+        (unsigned long)blob_len
+    );
+
+cleanup:
+    if (blob != NULL)
+    {
+        tsra_pkcs11_wipe(blob, blob_len);
+        free(blob);
+    }
+    free(spki);
+    free(priv_full);
+    free(pub_full);
+    return rv;
+}
+
 CK_RV C_UnwrapKey(
     CK_SESSION_HANDLE hSession,
     CK_MECHANISM_PTR pMechanism,
@@ -251,9 +366,46 @@ CK_RV C_UnwrapKey(
             rv = CKR_UNWRAPPING_KEY_HANDLE_INVALID; /* the handle names the unwrapping key here */
         }
     }
+    /* A private-key template, or one naming an RSA or EC key without a class,
+     * takes the key pair path, whose check reports the missing class; any
+     * other is judged as a secret key's, which refuses another class and an
+     * over-long template before it reads one. */
+    CK_OBJECT_CLASS cls = CK_UNAVAILABLE_INFORMATION;
+    CK_KEY_TYPE kt = CK_UNAVAILABLE_INFORMATION;
+    if ((rv == CKR_OK) && (ulAttributeCount <= TEMPLATE_MAX_ATTRS))
+    {
+        (void)tsra_pkcs11_tmpl_ulong(
+            tsra_pkcs11_tmpl_find(pTemplate, ulAttributeCount, CKA_CLASS),
+            &cls
+        );
+        (void)tsra_pkcs11_tmpl_ulong(
+            tsra_pkcs11_tmpl_find(pTemplate, ulAttributeCount, CKA_KEY_TYPE),
+            &kt
+        );
+    }
+    bool pair = (cls == CKO_PRIVATE_KEY) ||
+                ((cls == CK_UNAVAILABLE_INFORMATION) && ((kt == CKK_RSA) || (kt == CKK_EC)));
     /* Holds the template that is stored, so it must stay put until then. */
     tsra_pkcs11_unwrap_target target;
-    if (rv == CKR_OK)
+    tsra_pkcs11_private_target ptarget;
+    memset(&target, 0, sizeof(target));
+    memset(&ptarget, 0, sizeof(ptarget));
+    if ((rv == CKR_OK) && pair)
+    {
+        const char *why = NULL;
+        rv = tsra_pkcs11_unwrap_private_check(
+            pTemplate,
+            ulAttributeCount,
+            ulWrappedKeyLen,
+            &ptarget,
+            &why
+        );
+        if (why != NULL)
+        {
+            TSRA_PKCS11_LOG("C_UnwrapKey: template refused: %s", why);
+        }
+    }
+    else if (rv == CKR_OK)
     {
         rv = tsra_pkcs11_unwrap_check_template(
             pTemplate,
@@ -262,7 +414,8 @@ CK_RV C_UnwrapKey(
             &target
         );
     }
-    if ((rv == CKR_OK) && target.token && ((s->flags & CKF_RW_SESSION) == 0))
+    if ((rv == CKR_OK) && (pair ? ptarget.token : target.token) &&
+        ((s->flags & CKF_RW_SESSION) == 0))
     {
         rv = CKR_SESSION_READ_ONLY;
     }
@@ -279,6 +432,21 @@ CK_RV C_UnwrapKey(
     rv = unwrapping_key_handle(slot, &obj, &dev);
     if (rv != CKR_OK)
     {
+        goto cleanup;
+    }
+    if (pair)
+    {
+        rv = unwrap_private(
+            s,
+            dev,
+            &params,
+            &ptarget,
+            pTemplate,
+            ulAttributeCount,
+            pWrappedKey,
+            ulWrappedKeyLen,
+            phKey
+        );
         goto cleanup;
     }
     /* The unwrapped key is private unless the template says otherwise (see

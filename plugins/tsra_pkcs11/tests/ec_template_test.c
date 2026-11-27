@@ -370,6 +370,21 @@ static void test_raw_len_and_mechs(void)
             (tsra_pkcs11_sign_mech_find(CKM_AES_CBC) == NULL),
         "SHA-224, SHA-3 and cipher mechanisms are not signed"
     );
+    static const CK_MECHANISM_TYPE hmac[] = { CKM_SHA256_HMAC, CKM_SHA384_HMAC, CKM_SHA512_HMAC };
+    static const CK_KEY_TYPE hmac_key[] = { CKK_SHA256_HMAC, CKK_SHA384_HMAC, CKK_SHA512_HMAC };
+    all = true;
+    for (size_t i = 0; i < COUNT(hmac); i++)
+    {
+        m = tsra_pkcs11_sign_mech_find(hmac[i]);
+        all = all && (m != NULL) && (m->key_type == hmac_key[i]) && m->multipart;
+    }
+    CHECK(all, "CKM_SHA256/384/512_HMAC: the HMAC key type of their hash, multi-part");
+    CHECK(
+        (tsra_pkcs11_sign_mech_find(CKM_SHA_1_HMAC) == NULL) &&
+            (tsra_pkcs11_sign_mech_find(CKM_SHA224_HMAC) == NULL) &&
+            (tsra_pkcs11_sign_mech_find(CKM_SHA256_HMAC_GENERAL) == NULL),
+        "SHA-1 and SHA-224 HMAC and the _GENERAL variants are not signed"
+    );
 }
 
 /* A complete pair of templates for a P-256 signing key. */

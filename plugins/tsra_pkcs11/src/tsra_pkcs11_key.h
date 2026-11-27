@@ -40,23 +40,43 @@ extern "C"
 #define AES_XTS_TWEAK_LEN 16
 #define AES_XTS_MAX_DATA_LEN 8192
 
+/* The longest message an HMAC covers, one-shot or summed over the parts: the
+ * device command holds at most this many bytes (api/lib
+ * HsmHmacAlgo::MAX_MESSAGE_SIZE, the msg of ddi/mbor DdiHmacReq). */
+#define HMAC_MAX_DATA_LEN 1024
+
 /* The size of the partition's one RSA unwrapping key, the only RSA key the
  * device generates (api/lib HsmRsaKeyUnwrappingKeyGenAlgo). */
 #define RSA_UNWRAP_KEY_BITS 2048
+
+/* The RSA key sizes the device takes for an unwrapped key (api/lib
+ * algo/rsa/key.rs validate_key_size). */
+#define RSA_MIN_KEY_BITS 2048
+#define RSA_MID_KEY_BITS 3072
+#define RSA_MAX_KEY_BITS 4096
 
 /*
  * The TSRA key kinds this module can bind. PKCS#11 has one CKK_AES (and
  * CKK_AES_XTS), while the device has three disjoint kinds with distinct
  * handles and validators, so the kind travels with every key call. Named
  * here rather than as TSRA_KEY_KIND_* so the entry points stay compilable
- * without tsra.h; tsra_pkcs11_key.c translates it in device_kind() and
- * refuses any value outside the enum.
+ * without tsra.h; tsra_pkcs11_key.c translates it (device_kind() for the AES
+ * kinds, hmac_kind() for the HMAC kinds, hkdf_target() for what HKDF derives)
+ * and refuses any other value.
+ * The shared secret and the HMAC kinds exist only as C_DeriveKey output, and
+ * the RSA kind only names the key pair CKM_RSA_PKCS_OAEP runs on, which
+ * tsra_pkcs11_key_rsa_unmask binds.
  */
 typedef enum
 {
-    TSRA_PKCS11_KIND_AES = 0, /* CKM_AES_CBC, CKM_AES_CBC_PAD */
-    TSRA_PKCS11_KIND_AES_GCM, /* CKM_AES_GCM */
-    TSRA_PKCS11_KIND_AES_XTS, /* CKM_AES_XTS */
+    TSRA_PKCS11_KIND_AES = 0,       /* CKM_AES_CBC, CKM_AES_CBC_PAD */
+    TSRA_PKCS11_KIND_AES_GCM,       /* CKM_AES_GCM */
+    TSRA_PKCS11_KIND_AES_XTS,       /* CKM_AES_XTS */
+    TSRA_PKCS11_KIND_SHARED_SECRET, /* the ECDH secret, CKM_HKDF_DERIVE */
+    TSRA_PKCS11_KIND_HMAC_SHA256,   /* CKK_SHA256_HMAC */
+    TSRA_PKCS11_KIND_HMAC_SHA384,   /* CKK_SHA384_HMAC */
+    TSRA_PKCS11_KIND_HMAC_SHA512,   /* CKK_SHA512_HMAC */
+    TSRA_PKCS11_KIND_RSA,           /* CKM_RSA_PKCS_OAEP, an RSA key pair */
 } tsra_pkcs11_key_kind_t;
 
 /*
@@ -115,6 +135,20 @@ CK_RV tsra_pkcs11_key_aes_generate(
  * fail-closed backstop behind the host-side mechanism/key-type gates.
  */
 CK_RV tsra_pkcs11_key_aes_unmask(
+    uint32_t hsm_session,
+    tsra_pkcs11_key_kind_t kind,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    uint32_t *out_key
+);
+
+/*
+ * Unmask a stored HMAC masked blob of `kind` (an HMAC kind) into a device key
+ * handle, as tsra_pkcs11_key_aes_unmask does for AES. The SDK takes the hash
+ * from the blob, so the device key's kind is read back: a blob of another
+ * hash than `kind` returns CKR_KEY_HANDLE_INVALID, with no handle left.
+ */
+CK_RV tsra_pkcs11_key_hmac_unmask(
     uint32_t hsm_session,
     tsra_pkcs11_key_kind_t kind,
     const CK_BYTE *blob,
@@ -334,14 +368,87 @@ CK_RV tsra_pkcs11_key_ec_unmask(
 );
 
 /*
+ * Unwrap a CKM_RSA_AES_KEY_WRAP blob of a PKCS#8 private key with the
+ * unwrapping key `unwrapping_key` into a key pair, masked under the masking
+ * key `scope` names; `oaep_hash` and `aes_key_bits` as for
+ * tsra_pkcs11_key_aes_unwrap. `key_type` is CKK_RSA, with the modulus size in
+ * `rsa_bits` (the private key is the CRT kind), or CKK_EC, with `curve`.
+ * `usage` is the private key's one use, CKA_SIGN, CKA_DECRYPT (RSA only) or
+ * CKA_DERIVE (EC only), and the public key gets its counterpart; the SDK
+ * takes no other combination. Returns the pair's masked blob, which unmasks
+ * both halves (wipe it before free), and the public key's DER
+ * SubjectPublicKeyInfo, each in a malloc'd buffer the caller owns; the device
+ * handles are freed on return. Every failure of the unwrap itself returns
+ * CKR_WRAPPED_KEY_INVALID, for the reason tsra_pkcs11_key_aes_unwrap gives.
+ */
+CK_RV tsra_pkcs11_key_pair_unwrap(
+    uint32_t unwrapping_key,
+    CK_MECHANISM_TYPE oaep_hash,
+    CK_ULONG aes_key_bits,
+    CK_KEY_TYPE key_type,
+    CK_ULONG rsa_bits,
+    tsra_pkcs11_ec_curve_t curve,
+    CK_ATTRIBUTE_TYPE usage,
+    tsra_pkcs11_key_scope_t scope,
+    const CK_BYTE *wrapped,
+    CK_ULONG wrapped_len,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len,
+    CK_BYTE **out_spki,
+    CK_ULONG *out_spki_len
+);
+
+/*
+ * Unmask a stored RSA key pair blob into live device handles for both halves
+ * in `hsm_session`, and report the modulus size in bits as the device states
+ * it (2048, 3072 or 4096). Release both handles with tsra_pkcs11_key_release
+ * when the operation ends; on failure there are none.
+ */
+CK_RV tsra_pkcs11_key_rsa_unmask(
+    uint32_t hsm_session,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    uint32_t *out_priv,
+    uint32_t *out_pub,
+    CK_ULONG *out_bits
+);
+
+/*
+ * One-shot CKM_RSA_PKCS_OAEP under the device key `key_handle`: the public
+ * key encrypts (`encrypt`), the private key decrypts. `hash` (CKM_SHA256,
+ * CKM_SHA384 or CKM_SHA512) is the OAEP and the MGF1 hash, and `label`
+ * (`label_len` bytes, none when 0) the OAEP label, as
+ * tsra_pkcs11_oaep_params_check accepted them. *out_len is the capacity of
+ * `out` in, at least the modulus length, and the bytes written out. The SDK
+ * decrypts the raw RSA block into `out` before it removes the padding, so a
+ * decrypt must be handed a buffer of the caller's own. Every failure of a
+ * decrypt returns CKR_ENCRYPTED_DATA_INVALID: one answer for every bad
+ * ciphertext, label or padding, so the result is no padding oracle.
+ */
+CK_RV tsra_pkcs11_key_rsa_oaep(
+    bool encrypt,
+    uint32_t key_handle,
+    CK_MECHANISM_TYPE hash,
+    const CK_BYTE *label,
+    CK_ULONG label_len,
+    const CK_BYTE *in,
+    CK_ULONG in_len,
+    CK_BYTE *out,
+    CK_ULONG *out_len
+);
+
+/*
  * One-shot sign of `in` with the sign mechanism `mech` (a row of
- * tsra_pkcs11_sign_mech_find) under the device key `key_handle`. *sig_len is
- * the capacity of `sig` in and the bytes written out; the caller sizes `sig`
- * from the key, so a too-small one is CKR_BUFFER_TOO_SMALL with nothing
- * written. `in` and `sig` may overlap.
+ * tsra_pkcs11_sign_mech_find) under the device key `key_handle`. `pss` is the
+ * CK_RSA_PKCS_PSS_PARAMS of a PSS mechanism as tsra_pkcs11_sign_params_check
+ * and tsra_pkcs11_pss_salt_ok accepted them, NULL for every other mechanism.
+ * *sig_len is the capacity of `sig` in and the bytes written out; the caller
+ * sizes `sig` from the key, so a too-small one is CKR_BUFFER_TOO_SMALL with
+ * nothing written. `in` and `sig` may overlap.
  */
 CK_RV tsra_pkcs11_key_sign(
     CK_MECHANISM_TYPE mech,
+    const CK_RSA_PKCS_PSS_PARAMS *pss,
     uint32_t key_handle,
     const CK_BYTE *in,
     CK_ULONG in_len,
@@ -349,10 +456,13 @@ CK_RV tsra_pkcs11_key_sign(
     CK_ULONG *sig_len
 );
 
-/* One-shot verify of `sig` over `in`: CKR_OK for a valid signature,
- * CKR_SIGNATURE_INVALID for one that does not verify. */
+/* One-shot verify of `sig` over `in`, `pss` as for tsra_pkcs11_key_sign:
+ * CKR_OK for a valid signature, CKR_SIGNATURE_INVALID for one that does not
+ * verify. Not for an HMAC mechanism, whose tag the caller compares itself
+ * (the SDK's compare is not constant time). */
 CK_RV tsra_pkcs11_key_verify(
     CK_MECHANISM_TYPE mech,
+    const CK_RSA_PKCS_PSS_PARAMS *pss,
     uint32_t key_handle,
     const CK_BYTE *in,
     CK_ULONG in_len,
@@ -362,7 +472,8 @@ CK_RV tsra_pkcs11_key_verify(
 
 /*
  * Multi-part sign (`sign`) or verify through the SDK's stream context, for a
- * mechanism that hashes the message. *out_ctx is the context: feed it with
+ * mechanism that hashes the message (`pss` as for tsra_pkcs11_key_sign; the
+ * SDK keeps no pointer to it). *out_ctx is the context: feed it with
  * tsra_pkcs11_key_sign_stream_update, finish it with
  * tsra_pkcs11_key_sign_stream_final or tsra_pkcs11_key_verify_stream_final,
  * and release it with tsra_pkcs11_key_sign_stream_free whatever happened.
@@ -371,6 +482,7 @@ CK_RV tsra_pkcs11_key_verify(
 CK_RV tsra_pkcs11_key_sign_stream_new(
     bool sign,
     CK_MECHANISM_TYPE mech,
+    const CK_RSA_PKCS_PSS_PARAMS *pss,
     uint32_t key_handle,
     uint32_t *out_ctx
 );
@@ -391,6 +503,57 @@ CK_RV tsra_pkcs11_key_verify_stream_final(uint32_t ctx, const CK_BYTE *sig, CK_U
 
 /* Free a sign or verify stream context (no-op if 0). */
 void tsra_pkcs11_key_sign_stream_free(uint32_t ctx);
+
+/*
+ * CKM_ECDH1_DERIVE with CKD_NULL: unmask the EC key pair blob `blob` in
+ * `hsm_session`, check that the device puts it on `curve` (the curve the
+ * object names), and agree with the peer whose DER SubjectPublicKeyInfo is
+ * `peer` on that curve. Returns the masked blob of the shared secret (a
+ * shared-secret key that only derives, as long as the curve: 256, 384 or 521
+ * bits), masked under the masking key `scope` names, as
+ * tsra_pkcs11_key_aes_generate returns its blob. Device handles are released
+ * on every path. CKR_MECHANISM_PARAM_INVALID when the SDK refuses the peer
+ * key (a point not on the curve), CKR_KEY_HANDLE_INVALID when the pair is not
+ * on `curve`.
+ */
+CK_RV tsra_pkcs11_key_ecdh(
+    uint32_t hsm_session,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    tsra_pkcs11_ec_curve_t curve,
+    const CK_BYTE *peer,
+    CK_ULONG peer_len,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+);
+
+/*
+ * CKM_HKDF_DERIVE, extract and expand: unmask the shared secret blob `secret`
+ * in `hsm_session` and derive from it, with HMAC over `prf` (CKM_SHA256,
+ * CKM_SHA384 or CKM_SHA512), the optional `salt` and `info`, a key of `kind`
+ * (TSRA_PKCS11_KIND_AES or an HMAC kind) and `bit_len` bits, masked under the
+ * masking key `scope` names. Returns its masked blob as
+ * tsra_pkcs11_key_aes_generate does. An empty salt or info is passed as none,
+ * which HKDF treats alike (RFC 5869). The caller bounds both lengths
+ * (HKDF_MAX_SALT_LEN, HKDF_MAX_INFO_LEN). Device handles are released on
+ * every path.
+ */
+CK_RV tsra_pkcs11_key_hkdf(
+    uint32_t hsm_session,
+    const CK_BYTE *secret,
+    CK_ULONG secret_len,
+    CK_MECHANISM_TYPE prf,
+    const CK_BYTE *salt,
+    CK_ULONG salt_len,
+    const CK_BYTE *info,
+    CK_ULONG info_len,
+    tsra_pkcs11_key_kind_t kind,
+    uint32_t bit_len,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+);
 
 #ifdef __cplusplus
 }

@@ -7,8 +7,9 @@
 # and on a pass that is neither listed nor here. Tags:
 #
 #   rng: tests of the generator that pass only on the patched helper's host bytes
-#   presence-only: claim key persistence but only find the object again;
-#     key survival is the GoogleTest suite's job
+#   presence-only: claim key persistence but only find the object again, or
+#     only find a mechanism in the list; key survival and the mechanisms are
+#     the GoogleTest suite's job
 #   tool: check pkcs11-check's own tables, not the module
 #   environment: depend on host tools (p11-kit) the gate does not pin, or on
 #     how much memory the host can map (a count of 2^32 is checked only where
@@ -32,6 +33,7 @@ rng testcases/test_large_objects.py::TestLargeRandomGeneration::test_generate_1k
 rng testcases/test_session_state_machine.py::TestLoginTypeSpecificity::test_generate_random_without_login
 rng testcases/test_stress.py::TestRapidOperations::test_rapid_random_1000
 rng testcases/test_surface_audit.py::TestFunctionRobustness::test_random_with_zero_bits
+presence-only testcases/test_kdf.py::TestHKDF::test_hkdf_available
 presence-only testcases/test_object_visibility.py::TestTokenObjectPersistence::test_token_object_survives_session_close
 presence-only testcases/test_ro_session.py::TestSessionObjectLifecycle::test_token_object_persists_after_close
 presence-only testcases/test_session_state_machine.py::TestSessionCloseEffects::test_token_object_survives_session_close

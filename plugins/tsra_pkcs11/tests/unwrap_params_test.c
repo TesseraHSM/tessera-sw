@@ -6,7 +6,8 @@
  * (src/tsra_pkcs11_unwrap_params.c). No device, no store, no module load:
  *
  *   gcc -I ../include/pkcs11-v3.1 -I ../src unwrap_params_test.c \
- *       ../src/tsra_pkcs11_unwrap_params.c ../src/tsra_pkcs11_template.c \
+ *       ../src/tsra_pkcs11_unwrap_params.c ../src/tsra_pkcs11_unwrap_private.c \
+ *       ../src/tsra_pkcs11_template.c ../src/tsra_pkcs11_ec_template.c \
  *       ../src/tsra_pkcs11_attr_types.c ../src/tsra_pkcs11_digest.c \
  *       -o unwrap_params_test && ./unwrap_params_test
  *
@@ -17,12 +18,18 @@
  * exact key pair template and its refusals, the templates stored for both
  * halves, the SubjectPublicKeyInfo walk on a real RSA-1024 key, on broken
  * encodings and on DER lengths around the short and long forms, and the
- * comparison of an object's modulus with the device key.
+ * comparison of an object's modulus with the device key; for private-key
+ * targets the blob length window of each RSA size and EC curve at its
+ * edges, every template verdict and its order, and the two templates stored
+ * for the private key and its companion public key, from RSA and EC public
+ * key infos and from ones that are not the target's.
  */
 
 #include "tsra_pkcs11_unwrap_params.h"
+#include "tsra_pkcs11_unwrap_private.h"
 
 #include <limits.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -815,9 +822,19 @@ static void test_build(void)
 #define N_BYTE 0x5A  /* every modulus byte: positive, so no sign byte */
 #define SPKI_MAX 320 /* an SPKI with a modulus of up to 256 bytes */
 
+/* The AlgorithmIdentifier's parts: the tags its parameters are tested with,
+ * and rsaEncryption, 1.2.840.113549.1.1.1 (RFC 3279), as a DER OID TLV. */
+#define TAG_OCTET_STRING 0x04
+#define TAG_NULL 0x05
+#define TAG_OID 0x06
+#define RSA_OID_LEN 9
+#define RSA_OID_TLV TAG_OID, RSA_OID_LEN, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01
+#define RSA_OID_TLV_LEN (TLV_HEAD + RSA_OID_LEN)
+/* The content length of AlgorithmIdentifier { rsaEncryption, NULL }. */
+#define ALG_NULL_LEN (RSA_OID_TLV_LEN + TLV_HEAD)
 /* AlgorithmIdentifier { rsaEncryption, NULL } and INTEGER 65537 in DER. */
-static const CK_BYTE RSA_ALG[] = { 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86,
-                                   0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00 };
+static const CK_BYTE RSA_ALG[] = { TAG_SEQUENCE, ALG_NULL_LEN, RSA_OID_TLV, TAG_NULL, 0 };
+_Static_assert(sizeof(RSA_ALG) == TLV_HEAD + ALG_NULL_LEN, "RSA_OID_LEN counts the OID's bytes");
 static const CK_BYTE E_65537[] = { 0x02, 0x03, 0x01, 0x00, 0x01 };
 
 /* The fewest long-form length bytes `len` needs; 0 for the short form. */
@@ -844,20 +861,26 @@ static void put_head(CK_BYTE *out, size_t *k, CK_BYTE tag, size_t len, size_t le
 }
 
 /*
- * An rsaEncryption SubjectPublicKeyInfo with exponent 65537 and a modulus of
- * `n_len` N_BYTE bytes, whose INTEGER length takes `n_len_bytes` long-form
- * length bytes (0 for the short form); every other length is minimal. Returns
- * its length; `out` holds SPKI_MAX bytes.
+ * A SubjectPublicKeyInfo with the DER AlgorithmIdentifier `alg`, exponent 65537
+ * and a modulus of `n_len` N_BYTE bytes, whose INTEGER length takes
+ * `n_len_bytes` long-form length bytes (0 for the short form); every other
+ * length is minimal. Returns its length; `out` holds SPKI_MAX bytes.
  */
-static size_t rsa_spki(CK_BYTE *out, size_t n_len, size_t n_len_bytes)
+static size_t spki_with_alg(
+    CK_BYTE *out,
+    const CK_BYTE *alg,
+    size_t alg_len,
+    size_t n_len,
+    size_t n_len_bytes
+)
 {
     size_t rsa = (TLV_HEAD + n_len_bytes + n_len) + sizeof(E_65537);
     size_t bits = 1 + (TLV_HEAD + min_len_bytes(rsa) + rsa);
-    size_t outer = sizeof(RSA_ALG) + (TLV_HEAD + min_len_bytes(bits) + bits);
+    size_t outer = alg_len + (TLV_HEAD + min_len_bytes(bits) + bits);
     size_t k = 0;
     put_head(out, &k, TAG_SEQUENCE, outer, min_len_bytes(outer));
-    memcpy(out + k, RSA_ALG, sizeof(RSA_ALG));
-    k += sizeof(RSA_ALG);
+    memcpy(out + k, alg, alg_len);
+    k += alg_len;
     put_head(out, &k, TAG_BIT_STRING, bits, min_len_bytes(bits));
     out[k++] = 0; /* no unused bits */
     put_head(out, &k, TAG_SEQUENCE, rsa, min_len_bytes(rsa));
@@ -866,6 +889,12 @@ static size_t rsa_spki(CK_BYTE *out, size_t n_len, size_t n_len_bytes)
     k += n_len;
     memcpy(out + k, E_65537, sizeof(E_65537));
     return k + sizeof(E_65537);
+}
+
+/* spki_with_alg with { rsaEncryption, NULL }. */
+static size_t rsa_spki(CK_BYTE *out, size_t n_len, size_t n_len_bytes)
+{
+    return spki_with_alg(out, RSA_ALG, sizeof(RSA_ALG), n_len, n_len_bytes);
 }
 
 static void test_der_lengths(void)
@@ -893,6 +922,47 @@ static void test_der_lengths(void)
         tsra_pkcs11_rsa_public key;
         bool ok = tsra_pkcs11_spki_rsa(spki, len, &key);
         CHECK((ok == rows[i].ok) && (!ok || (key.n_len == rows[i].n_len)), rows[i].what);
+    }
+}
+
+static void test_alg_params(void)
+{
+    printf("== spki_rsa: AlgorithmIdentifier parameters ==\n");
+    static const CK_BYTE absent[] = { TAG_SEQUENCE, RSA_OID_TLV_LEN, RSA_OID_TLV };
+    static const CK_BYTE truncated[] = { TAG_SEQUENCE, ALG_NULL_LEN, RSA_OID_TLV, TAG_NULL, 1 };
+    static const CK_BYTE content[] = {
+        TAG_SEQUENCE, ALG_NULL_LEN + 1, RSA_OID_TLV, TAG_NULL, 1, 0
+    };
+    static const CK_BYTE trailing[] = {
+        TAG_SEQUENCE, ALG_NULL_LEN + 1, RSA_OID_TLV, TAG_NULL, 0, 0
+    };
+    static const CK_BYTE other[] = { TAG_SEQUENCE, ALG_NULL_LEN, RSA_OID_TLV, TAG_OCTET_STRING, 0 };
+    struct
+    {
+        const CK_BYTE *alg;
+        size_t len;
+        bool ok;
+        const char *what;
+    } rows[] = {
+        { RSA_ALG, sizeof(RSA_ALG), true, "NULL parameters are read" },
+        { absent, sizeof(absent), false, "absent parameters are refused" },
+        { truncated, sizeof(truncated), false, "a NULL whose length runs past the end is refused" },
+        { content, sizeof(content), false, "a NULL with content is refused" },
+        { trailing, sizeof(trailing), false, "a byte after the NULL is refused" },
+        { other, sizeof(other), false, "an OCTET STRING instead of the NULL is refused" },
+    };
+    for (size_t i = 0; i < COUNT(rows); i++)
+    {
+        CK_BYTE spki[SPKI_MAX];
+        size_t len = spki_with_alg(
+            spki,
+            rows[i].alg,
+            rows[i].len,
+            RSA_UNWRAP_MODULUS_BYTES,
+            min_len_bytes(RSA_UNWRAP_MODULUS_BYTES)
+        );
+        tsra_pkcs11_rsa_public key;
+        CHECK(tsra_pkcs11_spki_rsa(spki, len, &key) == rows[i].ok, rows[i].what);
     }
 }
 
@@ -928,6 +998,737 @@ static void test_match(void)
     );
 }
 
+/* ========================================================================= */
+/* Private-key targets (src/tsra_pkcs11_unwrap_private.c)                    */
+/* ========================================================================= */
+
+/*
+ * The blob lengths of private keys. EC: OpenSSL's PKCS#8 of P-256, P-384 and
+ * P-521 keys with their public point is 138, 185 and 241 bytes; RFC 5649 pads
+ * that to 144, 192 and 248 and adds 8, after the 256-byte OAEP block: 408,
+ * 456 and 512. RSA: every component at its shortest DER encoding the firmware
+ * takes (a modulus of k bytes, primes of k/2, a 1-byte exponent, private
+ * exponent and CRT values) gives a 2048-bit PKCS#8 of 570 bytes, a blob of
+ * 840; at its longest (sign bytes, a 4-byte exponent) 1222, 1798 and 2379
+ * bytes for 2048, 3072 and 4096 bits, blobs of 1488, 2064 and 2648. Each size
+ * starts one semiblock above the longest of the size below.
+ */
+#define SEMIBLOCK 8
+static const struct
+{
+    CK_KEY_TYPE kt;
+    CK_ULONG len;
+    CK_RV want;
+    CK_ULONG bits;
+    tsra_pkcs11_ec_curve_t curve;
+} WINDOWS[] = {
+    { CKK_EC, 408, CKR_OK, 0, TSRA_PKCS11_CURVE_P256 },
+    { CKK_EC, 456, CKR_OK, 0, TSRA_PKCS11_CURVE_P384 },
+    { CKK_EC, 512, CKR_OK, 0, TSRA_PKCS11_CURVE_P521 },
+    { CKK_EC, 408 - SEMIBLOCK, CKR_WRAPPED_KEY_LEN_RANGE, 0, TSRA_PKCS11_CURVE_NONE },
+    { CKK_EC, 408 + SEMIBLOCK, CKR_WRAPPED_KEY_LEN_RANGE, 0, TSRA_PKCS11_CURVE_NONE },
+    { CKK_EC, 456 - SEMIBLOCK, CKR_WRAPPED_KEY_LEN_RANGE, 0, TSRA_PKCS11_CURVE_NONE },
+    { CKK_EC, 512 + SEMIBLOCK, CKR_WRAPPED_KEY_LEN_RANGE, 0, TSRA_PKCS11_CURVE_NONE },
+    { CKK_EC, 1488, CKR_WRAPPED_KEY_LEN_RANGE, 0, TSRA_PKCS11_CURVE_NONE },
+    { CKK_RSA, 0, CKR_WRAPPED_KEY_LEN_RANGE, 0, TSRA_PKCS11_CURVE_NONE },
+    { CKK_RSA, 512, CKR_WRAPPED_KEY_LEN_RANGE, 0, TSRA_PKCS11_CURVE_NONE },
+    { CKK_RSA, 840 - SEMIBLOCK, CKR_WRAPPED_KEY_LEN_RANGE, 0, TSRA_PKCS11_CURVE_NONE },
+    { CKK_RSA, 840, CKR_OK, 2048, TSRA_PKCS11_CURVE_NONE },
+    { CKK_RSA, 1488, CKR_OK, 2048, TSRA_PKCS11_CURVE_NONE },
+    { CKK_RSA, 1487, CKR_WRAPPED_KEY_LEN_RANGE, 0, TSRA_PKCS11_CURVE_NONE },
+    { CKK_RSA, 1489, CKR_WRAPPED_KEY_LEN_RANGE, 0, TSRA_PKCS11_CURVE_NONE },
+    { CKK_RSA, 1488 + SEMIBLOCK, CKR_OK, 3072, TSRA_PKCS11_CURVE_NONE },
+    { CKK_RSA, 2064, CKR_OK, 3072, TSRA_PKCS11_CURVE_NONE },
+    { CKK_RSA, 2064 + SEMIBLOCK, CKR_OK, 4096, TSRA_PKCS11_CURVE_NONE },
+    { CKK_RSA, 2640, CKR_OK, 4096, TSRA_PKCS11_CURVE_NONE }, /* OpenSSL's 2374 bytes */
+    { CKK_RSA, 2648, CKR_OK, 4096, TSRA_PKCS11_CURVE_NONE },
+    { CKK_RSA, 2648 + SEMIBLOCK, CKR_WRAPPED_KEY_LEN_RANGE, 0, TSRA_PKCS11_CURVE_NONE },
+};
+
+static void test_private_windows(void)
+{
+    printf("== private_blob_size ==\n");
+    for (size_t i = 0; i < COUNT(WINDOWS); i++)
+    {
+        CK_ULONG bits = 1;
+        tsra_pkcs11_ec_curve_t curve = TSRA_PKCS11_CURVE_P256;
+        CK_RV rv = tsra_pkcs11_private_blob_size(WINDOWS[i].kt, WINDOWS[i].len, &bits, &curve);
+        char msg[128];
+        snprintf(
+            msg,
+            sizeof(msg),
+            "%s blob of %lu bytes -> 0x%lx, %lu bits, curve %d",
+            (WINDOWS[i].kt == CKK_RSA) ? "an RSA" : "an EC",
+            WINDOWS[i].len,
+            WINDOWS[i].want,
+            WINDOWS[i].bits,
+            (int)WINDOWS[i].curve
+        );
+        CHECK(
+            (rv == WINDOWS[i].want) && (bits == WINDOWS[i].bits) && (curve == WINDOWS[i].curve),
+            msg
+        );
+    }
+    CK_ULONG bits = 0;
+    tsra_pkcs11_ec_curve_t curve = TSRA_PKCS11_CURVE_NONE;
+    CHECK(
+        (tsra_pkcs11_private_blob_size(CKK_RSA, 1488, NULL, &curve) == CKR_ARGUMENTS_BAD) &&
+            (tsra_pkcs11_private_blob_size(CKK_RSA, 1488, &bits, NULL) == CKR_ARGUMENTS_BAD),
+        "NULL outputs -> CKR_ARGUMENTS_BAD"
+    );
+    CHECK(
+        tsra_pkcs11_private_blob_size(CKK_AES, 1488, &bits, &curve) == CKR_ARGUMENTS_BAD,
+        "another key type -> CKR_ARGUMENTS_BAD"
+    );
+}
+
+static CK_KEY_TYPE g_ec = CKK_EC;
+static CK_OBJECT_CLASS g_wide_class[2] = { CKO_PRIVATE_KEY, CKO_PRIVATE_KEY };
+static CK_ULONG g_wide_bool = CK_TRUE;
+static CK_BYTE g_material[4] = { 0x0A, 0x0B, 0x0C, 0x0D };
+static CK_BYTE g_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+static CK_BYTE g_p384[] = { 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22 };
+static CK_BYTE g_bad_params[] = { 0x06, 0x05, 0x2b };
+/* secp256k1, a named curve the token does not support. */
+static CK_BYTE g_secp256k1[] = { 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a };
+static CK_MECHANISM_TYPE g_one_mech = CKM_SHA256_RSA_PKCS;
+static CK_MECHANISM_TYPE g_many_mechs[KEYGEN_MAX_ALLOWED_MECHS + 1];
+static char g_name[] = "imported";
+
+/* The private-key verdicts, each template judged at `len`. */
+typedef struct
+{
+    const char *what;
+    CK_ATTRIBUTE tmpl[6];
+    CK_ULONG count;
+    CK_ULONG len;
+    CK_RV want;
+} private_case;
+
+#define RSA_PRIV ATTR(CKA_CLASS, g_private), ATTR(CKA_KEY_TYPE, g_rsa)
+#define EC_PRIV ATTR(CKA_CLASS, g_private), ATTR(CKA_KEY_TYPE, g_ec)
+#define RSA_BLOB 1488
+#define EC_BLOB 456
+
+static const private_case PRIVATE_CASES[] = {
+    { "RSA, CKA_SIGN", { RSA_PRIV, ATTR(CKA_SIGN, g_true) }, 3, RSA_BLOB, CKR_OK },
+    { "RSA, CKA_DECRYPT", { RSA_PRIV, ATTR(CKA_DECRYPT, g_true) }, 3, RSA_BLOB, CKR_OK },
+    { "RSA, CKA_SIGN with CKA_DECRYPT FALSE",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_DECRYPT, g_false) },
+      4,
+      RSA_BLOB,
+      CKR_OK },
+    { "EC, CKA_SIGN", { EC_PRIV, ATTR(CKA_SIGN, g_true) }, 3, EC_BLOB, CKR_OK },
+    { "EC, CKA_DERIVE", { EC_PRIV, ATTR(CKA_DERIVE, g_true) }, 3, EC_BLOB, CKR_OK },
+    { "no class",
+      { ATTR(CKA_KEY_TYPE, g_rsa), ATTR(CKA_SIGN, g_true) },
+      2,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCOMPLETE },
+    { "no key type",
+      { ATTR(CKA_CLASS, g_private), ATTR(CKA_SIGN, g_true) },
+      2,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCOMPLETE },
+    { "a secret class",
+      { ATTR(CKA_CLASS, g_secret), ATTR(CKA_KEY_TYPE, g_rsa), ATTR(CKA_SIGN, g_true) },
+      3,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "a class of the wrong width",
+      { ATTR(CKA_CLASS, g_wide_class), ATTR(CKA_KEY_TYPE, g_rsa), ATTR(CKA_SIGN, g_true) },
+      3,
+      RSA_BLOB,
+      CKR_ATTRIBUTE_VALUE_INVALID },
+    { "an AES key type",
+      { ATTR(CKA_CLASS, g_private), ATTR(CKA_KEY_TYPE, g_aes), ATTR(CKA_SIGN, g_true) },
+      3,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "RSA signs and decrypts",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_DECRYPT, g_true) },
+      4,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "RSA with no usage", { RSA_PRIV }, 2, RSA_BLOB, CKR_TEMPLATE_INCONSISTENT },
+    { "RSA with only usages FALSE",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_false) },
+      3,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "RSA unwraps",
+      { RSA_PRIV, ATTR(CKA_UNWRAP, g_true) },
+      3,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "RSA derives",
+      { RSA_PRIV, ATTR(CKA_DERIVE, g_true) },
+      3,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "RSA signs with recovery",
+      { RSA_PRIV, ATTR(CKA_SIGN_RECOVER, g_true) },
+      3,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "RSA signs and verifies",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_VERIFY, g_true) },
+      4,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "EC signs and derives",
+      { EC_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_DERIVE, g_true) },
+      4,
+      EC_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "EC decrypts",
+      { EC_PRIV, ATTR(CKA_DECRYPT, g_true) },
+      3,
+      EC_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "a usage of the wrong width",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_wide_bool) },
+      3,
+      RSA_BLOB,
+      CKR_ATTRIBUTE_VALUE_INVALID },
+    { "a repeated attribute",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_SIGN, g_true) },
+      4,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "CKA_LOCAL",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_LOCAL, g_false) },
+      4,
+      RSA_BLOB,
+      CKR_ATTRIBUTE_READ_ONLY },
+    { "CKA_NEVER_EXTRACTABLE",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_NEVER_EXTRACTABLE, g_true) },
+      4,
+      RSA_BLOB,
+      CKR_ATTRIBUTE_READ_ONLY },
+    { "a private exponent",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_PRIVATE_EXPONENT, g_material) },
+      4,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "a prime",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_PRIME_1, g_material) },
+      4,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "CKA_VALUE",
+      { EC_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_VALUE, g_material) },
+      4,
+      EC_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "a modulus",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_MODULUS, g_material) },
+      4,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "a public exponent",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_PUBLIC_EXPONENT, g_material) },
+      4,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "a modulus size",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_MODULUS_BITS, g_bits) },
+      4,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "an EC point",
+      { EC_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_EC_POINT, g_material) },
+      4,
+      EC_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "not sensitive",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_SENSITIVE, g_false) },
+      4,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "sensitive",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_SENSITIVE, g_true) },
+      4,
+      RSA_BLOB,
+      CKR_OK },
+    { "extractable",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_EXTRACTABLE, g_true) },
+      4,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "not extractable",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_EXTRACTABLE, g_false) },
+      4,
+      RSA_BLOB,
+      CKR_OK },
+    { "always authenticate",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_ALWAYS_AUTHENTICATE, g_true) },
+      4,
+      RSA_BLOB,
+      CKR_ATTRIBUTE_VALUE_INVALID },
+    { "not always authenticate",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_ALWAYS_AUTHENTICATE, g_false) },
+      4,
+      RSA_BLOB,
+      CKR_OK },
+    { "a public token key",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_TOKEN, g_true), ATTR(CKA_PRIVATE, g_false) },
+      5,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "a public session key",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_PRIVATE, g_false) },
+      4,
+      RSA_BLOB,
+      CKR_OK },
+    { "an empty allowed list",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), { CKA_ALLOWED_MECHANISMS, g_many_mechs, 0 } },
+      4,
+      RSA_BLOB,
+      CKR_ATTRIBUTE_VALUE_INVALID },
+    { "an over-long allowed list",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_ALLOWED_MECHANISMS, g_many_mechs) },
+      4,
+      RSA_BLOB,
+      CKR_ATTRIBUTE_VALUE_INVALID },
+    { "an allowed list",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_ALLOWED_MECHANISMS, g_one_mech) },
+      4,
+      RSA_BLOB,
+      CKR_OK },
+    { "an attribute array",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), { CKA_UNWRAP_TEMPLATE, NULL, 0 } },
+      4,
+      RSA_BLOB,
+      CKR_ATTRIBUTE_TYPE_INVALID },
+    { "an RSA key with a curve",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_EC_PARAMS, g_p256) },
+      4,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "the blob's curve",
+      { EC_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_EC_PARAMS, g_p384) },
+      4,
+      EC_BLOB,
+      CKR_OK },
+    { "another curve",
+      { EC_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_EC_PARAMS, g_p256) },
+      4,
+      EC_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "a malformed curve",
+      { EC_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_EC_PARAMS, g_bad_params) },
+      4,
+      EC_BLOB,
+      CKR_ATTRIBUTE_VALUE_INVALID },
+    { "an empty curve",
+      { EC_PRIV, ATTR(CKA_SIGN, g_true), { CKA_EC_PARAMS, g_p256, 0 } },
+      4,
+      EC_BLOB,
+      CKR_ATTRIBUTE_VALUE_INVALID },
+    { "an unsupported curve",
+      { EC_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_EC_PARAMS, g_secp256k1) },
+      4,
+      EC_BLOB,
+      CKR_CURVE_NOT_SUPPORTED },
+    { "a public key info",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_PUBLIC_KEY_INFO, g_material) },
+      4,
+      RSA_BLOB,
+      CKR_TEMPLATE_INCONSISTENT },
+    { "a malformed curve before the length",
+      { EC_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_EC_PARAMS, g_bad_params) },
+      4,
+      0,
+      CKR_ATTRIBUTE_VALUE_INVALID },
+    { "an RSA key in an EC blob",
+      { RSA_PRIV, ATTR(CKA_SIGN, g_true) },
+      3,
+      EC_BLOB,
+      CKR_WRAPPED_KEY_LEN_RANGE },
+    { "an EC key in an RSA blob",
+      { EC_PRIV, ATTR(CKA_SIGN, g_true) },
+      3,
+      RSA_BLOB,
+      CKR_WRAPPED_KEY_LEN_RANGE },
+    { "attribute verdicts before the class",
+      { ATTR(CKA_KEY_TYPE, g_rsa), ATTR(CKA_LOCAL, g_true) },
+      2,
+      RSA_BLOB,
+      CKR_ATTRIBUTE_READ_ONLY },
+    { "the usage before the length", { RSA_PRIV }, 2, 0, CKR_TEMPLATE_INCONSISTENT },
+    { "a curve that is not the blob's after the length",
+      { EC_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_EC_PARAMS, g_p256) },
+      4,
+      0,
+      CKR_WRAPPED_KEY_LEN_RANGE },
+};
+
+static void test_private_check(void)
+{
+    printf("== unwrap_private_check ==\n");
+    for (size_t i = 0; i < COUNT(g_many_mechs); i++)
+    {
+        g_many_mechs[i] = CKM_SHA256_RSA_PKCS;
+    }
+    for (size_t i = 0; i < COUNT(PRIVATE_CASES); i++)
+    {
+        const private_case *c = &PRIVATE_CASES[i];
+        tsra_pkcs11_private_target out;
+        const char *why = NULL;
+        CK_RV rv = tsra_pkcs11_unwrap_private_check(c->tmpl, c->count, c->len, &out, &why);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "%s -> 0x%lx", c->what, c->want);
+        CHECK((rv == c->want) && ((rv != CKR_TEMPLATE_INCONSISTENT) || (why != NULL)), msg);
+    }
+    tsra_pkcs11_private_target out;
+    CK_ATTRIBUTE rsa[] = { RSA_PRIV, ATTR(CKA_DECRYPT, g_true), ATTR(CKA_TOKEN, g_true) };
+    CHECK(
+        (tsra_pkcs11_unwrap_private_check(rsa, COUNT(rsa), 2064, &out, NULL) == CKR_OK) &&
+            (out.key_type == CKK_RSA) && (out.rsa_bits == 3072) &&
+            (out.curve == TSRA_PKCS11_CURVE_NONE) && (out.usage == CKA_DECRYPT) && out.token,
+        "an RSA decrypting token key at 2064 bytes -> 3072 bits, its use and CKA_TOKEN"
+    );
+    CK_ATTRIBUTE ec[] = { EC_PRIV, ATTR(CKA_DERIVE, g_true) };
+    CHECK(
+        (tsra_pkcs11_unwrap_private_check(ec, COUNT(ec), 512, &out, NULL) == CKR_OK) &&
+            (out.key_type == CKK_EC) && (out.curve == TSRA_PKCS11_CURVE_P521) &&
+            (out.usage == CKA_DERIVE) && !out.token,
+        "an EC deriving session key at 512 bytes -> P-521"
+    );
+    CHECK(
+        tsra_pkcs11_unwrap_private_check(rsa, COUNT(rsa), RSA_BLOB, NULL, NULL) ==
+            CKR_ARGUMENTS_BAD,
+        "NULL output -> CKR_ARGUMENTS_BAD"
+    );
+    CHECK(
+        tsra_pkcs11_unwrap_private_check(NULL, 1, RSA_BLOB, &out, NULL) == CKR_ARGUMENTS_BAD,
+        "a NULL template with a count -> CKR_ARGUMENTS_BAD"
+    );
+    CHECK(
+        tsra_pkcs11_unwrap_private_check(rsa, TEMPLATE_MAX_ATTRS + 1, RSA_BLOB, &out, NULL) ==
+            CKR_ARGUMENTS_BAD,
+        "a count over TEMPLATE_MAX_ATTRS -> CKR_ARGUMENTS_BAD"
+    );
+}
+
+/* Whether a built template holds each type once. */
+static bool unique_types(const CK_ATTRIBUTE *t, CK_ULONG n)
+{
+    for (CK_ULONG i = 0; i < n; i++)
+    {
+        if (tsra_pkcs11_tmpl_find(t, i, t[i].type) != NULL)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool has_bool(const CK_ATTRIBUTE *t, CK_ULONG n, CK_ATTRIBUTE_TYPE type, CK_BBOOL b)
+{
+    return has(t, n, type, &b, sizeof(b));
+}
+
+static void sha1(const CK_BYTE *in, CK_ULONG len, CK_BYTE *out)
+{
+    tsra_pkcs11_digest_op_t *op = NULL;
+    if (tsra_pkcs11_digest_op_new(CKM_SHA_1, &op) == CKR_OK)
+    {
+        tsra_pkcs11_digest_op_update(op, in, len);
+        tsra_pkcs11_digest_op_final(op, out);
+        tsra_pkcs11_digest_op_free(op);
+    }
+}
+
+static void test_private_build(void)
+{
+    printf("== unwrap_private_build ==\n");
+    static const CK_ULONG k2048 = 256; /* the modulus bytes of the RSA-2048 SPKI below */
+    CK_BYTE spki[SPKI_MAX];
+    size_t spki_len = rsa_spki(spki, k2048, 2);
+    CK_BYTE n[256];
+    memset(n, N_BYTE, sizeof(n));
+    CK_BYTE id[TSRA_PKCS11_SHA1_DIGEST_LEN];
+    sha1(n, sizeof(n), id);
+    CK_BYTE e[] = { 0x01, 0x00, 0x01 };
+    CK_ULONG bits = 2048;
+    CK_MECHANISM_TYPE none = CK_UNAVAILABLE_INFORMATION;
+    CK_OBJECT_CLASS pub_cls = CKO_PUBLIC_KEY;
+
+    tsra_pkcs11_private_target t = { CKK_RSA, 2048, TSRA_PKCS11_CURVE_NONE, CKA_SIGN, CK_FALSE };
+    CK_ATTRIBUTE tmpl[] = { RSA_PRIV, ATTR(CKA_SIGN, g_true), ATTR(CKA_LABEL, g_name) };
+    static tsra_pkcs11_private_fill fill;
+    CK_ATTRIBUTE priv[COUNT(tmpl) + UNWRAP_PRIV_APPENDED_ATTRS];
+    CK_ATTRIBUTE pub[UNWRAP_PUB_ATTRS];
+    CK_ULONG np = 0;
+    CK_ULONG nu = 0;
+    CK_RV rv = tsra_pkcs11_unwrap_private_build(
+        &t,
+        tmpl,
+        COUNT(tmpl),
+        spki,
+        spki_len,
+        &fill,
+        priv,
+        &np,
+        pub,
+        &nu
+    );
+    CHECK(
+        (rv == CKR_OK) && unique_types(priv, np) && unique_types(pub, nu),
+        "RSA: each type once on both"
+    );
+    CHECK(
+        (np >= COUNT(tmpl)) && (memcmp(priv, tmpl, sizeof(tmpl)) == 0),
+        "RSA private key: the caller's template first, verbatim"
+    );
+    CHECK(
+        has_bool(priv, np, CKA_PRIVATE, CK_TRUE) && has_bool(priv, np, CKA_SENSITIVE, CK_TRUE) &&
+            has_bool(priv, np, CKA_EXTRACTABLE, CK_FALSE) &&
+            has_bool(priv, np, CKA_LOCAL, CK_FALSE) &&
+            has_bool(priv, np, CKA_ALWAYS_SENSITIVE, CK_FALSE) &&
+            has_bool(priv, np, CKA_NEVER_EXTRACTABLE, CK_FALSE) &&
+            has(priv, np, CKA_KEY_GEN_MECHANISM, &none, sizeof(none)),
+        "RSA private key: private, sensitive, not extractable, and imported, not local"
+    );
+    CHECK(
+        has_bool(priv, np, CKA_DECRYPT, CK_FALSE) &&
+            has_bool(priv, np, CKA_SIGN_RECOVER, CK_FALSE) &&
+            has_bool(priv, np, CKA_UNWRAP, CK_FALSE) && has_bool(priv, np, CKA_DERIVE, CK_FALSE),
+        "RSA private key: the other usages FALSE"
+    );
+    CHECK(
+        has(priv, np, CKA_MODULUS, n, sizeof(n)) &&
+            has(priv, np, CKA_PUBLIC_EXPONENT, e, sizeof(e)) &&
+            has(priv, np, CKA_ID, id, sizeof(id)) &&
+            (tsra_pkcs11_tmpl_find(priv, np, CKA_MODULUS_BITS) == NULL),
+        "RSA private key: the modulus and exponent of the SPKI, CKA_ID its SHA-1, no "
+        "CKA_MODULUS_BITS"
+    );
+    CHECK(
+        has(pub, nu, CKA_CLASS, &pub_cls, sizeof(pub_cls)) &&
+            has(pub, nu, CKA_KEY_TYPE, &g_rsa, sizeof(g_rsa)) &&
+            has_bool(pub, nu, CKA_TOKEN, CK_FALSE) && has_bool(pub, nu, CKA_PRIVATE, CK_FALSE) &&
+            has(pub, nu, CKA_ID, id, sizeof(id)) &&
+            has(pub, nu, CKA_LABEL, g_name, sizeof(g_name)) &&
+            has_bool(pub, nu, CKA_LOCAL, CK_FALSE) &&
+            has(pub, nu, CKA_KEY_GEN_MECHANISM, &none, sizeof(none)),
+        "RSA public key: a session public key with the template's label and the same ID"
+    );
+    CHECK(
+        has_bool(pub, nu, CKA_VERIFY, CK_TRUE) && has_bool(pub, nu, CKA_ENCRYPT, CK_FALSE) &&
+            has_bool(pub, nu, CKA_VERIFY_RECOVER, CK_FALSE) &&
+            has_bool(pub, nu, CKA_WRAP, CK_FALSE) && has_bool(pub, nu, CKA_DERIVE, CK_FALSE),
+        "RSA public key of a signing key: verifies only"
+    );
+    CHECK(
+        has(pub, nu, CKA_MODULUS, n, sizeof(n)) &&
+            has(pub, nu, CKA_PUBLIC_EXPONENT, e, sizeof(e)) &&
+            has(pub, nu, CKA_MODULUS_BITS, &bits, sizeof(bits)) &&
+            (tsra_pkcs11_tmpl_find(pub, nu, CKA_SENSITIVE) == NULL),
+        "RSA public key: modulus, exponent and CKA_MODULUS_BITS"
+    );
+
+    /* A decrypting token key with its own ID. */
+    CK_BYTE my_id[] = { 'i', 'd' };
+    CK_ATTRIBUTE dec[] = { RSA_PRIV,
+                           ATTR(CKA_DECRYPT, g_true),
+                           ATTR(CKA_TOKEN, g_true),
+                           ATTR(CKA_ID, my_id) };
+    t.usage = CKA_DECRYPT;
+    t.token = CK_TRUE;
+    CK_ATTRIBUTE priv2[COUNT(dec) + UNWRAP_PRIV_APPENDED_ATTRS];
+    rv = tsra_pkcs11_unwrap_private_build(
+        &t,
+        dec,
+        COUNT(dec),
+        spki,
+        spki_len,
+        &fill,
+        priv2,
+        &np,
+        pub,
+        &nu
+    );
+    CHECK(
+        (rv == CKR_OK) && unique_types(priv2, np) && has(priv2, np, CKA_ID, my_id, sizeof(my_id)) &&
+            has(pub, nu, CKA_ID, my_id, sizeof(my_id)) && has_bool(pub, nu, CKA_TOKEN, CK_TRUE) &&
+            has_bool(pub, nu, CKA_ENCRYPT, CK_TRUE) && has_bool(pub, nu, CKA_VERIFY, CK_FALSE) &&
+            has_bool(priv2, np, CKA_SIGN, CK_FALSE) &&
+            (tsra_pkcs11_tmpl_find(pub, nu, CKA_LABEL) == NULL),
+        "RSA decrypting token key: the template's ID and CKA_TOKEN on both, an encrypting public "
+        "key"
+    );
+
+    /* EC: the point from an SPKI the EC encoder writes. */
+    CK_BYTE point[1 + (2 * 32)];
+    memset(point, 0x11, sizeof(point));
+    point[0] = EC_POINT_UNCOMPRESSED;
+    CK_BYTE ec_spki[EC_SPKI_DER_MAX];
+    CK_ULONG ec_spki_len = sizeof(ec_spki);
+    CK_RV enc = tsra_pkcs11_ec_spki_from_point(
+        TSRA_PKCS11_CURVE_P256,
+        point,
+        sizeof(point),
+        ec_spki,
+        &ec_spki_len
+    );
+    CK_BYTE point_id[TSRA_PKCS11_SHA1_DIGEST_LEN];
+    sha1(point, sizeof(point), point_id);
+    CK_BYTE der_point[2 + sizeof(point)] = { 0x04, (CK_BYTE)sizeof(point) };
+    memcpy(der_point + 2, point, sizeof(point));
+    tsra_pkcs11_private_target et = { CKK_EC, 0, TSRA_PKCS11_CURVE_P256, CKA_DERIVE, CK_FALSE };
+    CK_ATTRIBUTE ec[] = { EC_PRIV, ATTR(CKA_DERIVE, g_true), ATTR(CKA_EC_PARAMS, g_p256) };
+    CK_ATTRIBUTE priv3[COUNT(ec) + UNWRAP_PRIV_APPENDED_ATTRS];
+    rv = tsra_pkcs11_unwrap_private_build(
+        &et,
+        ec,
+        COUNT(ec),
+        ec_spki,
+        ec_spki_len,
+        &fill,
+        priv3,
+        &np,
+        pub,
+        &nu
+    );
+    CHECK(
+        (enc == CKR_OK) && (rv == CKR_OK) && unique_types(priv3, np) && unique_types(pub, nu) &&
+            has(priv3, np, CKA_EC_PARAMS, g_p256, sizeof(g_p256)) &&
+            (tsra_pkcs11_tmpl_find(priv3, np, CKA_EC_POINT) == NULL) &&
+            (tsra_pkcs11_tmpl_find(priv3, np, CKA_MODULUS) == NULL) &&
+            has(priv3, np, CKA_ID, point_id, sizeof(point_id)),
+        "EC private key: the curve once, no point, CKA_ID the SHA-1 of the point"
+    );
+    CHECK(
+        has(pub, nu, CKA_EC_PARAMS, g_p256, sizeof(g_p256)) &&
+            has(pub, nu, CKA_EC_POINT, der_point, sizeof(der_point)) &&
+            has(pub, nu, CKA_ID, point_id, sizeof(point_id)) &&
+            has_bool(pub, nu, CKA_DERIVE, CK_TRUE) && has_bool(pub, nu, CKA_VERIFY, CK_FALSE) &&
+            (tsra_pkcs11_tmpl_find(pub, nu, CKA_MODULUS) == NULL),
+        "EC public key of a deriving key: derives, with the curve and the point in an OCTET STRING"
+    );
+
+    /* A public key info that is not the target's. */
+    t.usage = CKA_SIGN;
+    t.token = CK_FALSE;
+    t.rsa_bits = 3072;
+    CHECK(
+        tsra_pkcs11_unwrap_private_build(
+            &t,
+            tmpl,
+            COUNT(tmpl),
+            spki,
+            spki_len,
+            &fill,
+            priv,
+            &np,
+            pub,
+            &nu
+        ) == CKR_DEVICE_ERROR,
+        "an RSA-2048 SPKI for a 3072-bit target -> CKR_DEVICE_ERROR"
+    );
+    t.rsa_bits = 2048;
+    CHECK(
+        tsra_pkcs11_unwrap_private_build(
+            &t,
+            tmpl,
+            COUNT(tmpl),
+            ec_spki,
+            ec_spki_len,
+            &fill,
+            priv,
+            &np,
+            pub,
+            &nu
+        ) == CKR_DEVICE_ERROR,
+        "an EC SPKI for an RSA target -> CKR_DEVICE_ERROR"
+    );
+    et.curve = TSRA_PKCS11_CURVE_P384;
+    CHECK(
+        tsra_pkcs11_unwrap_private_build(
+            &et,
+            ec,
+            COUNT(ec),
+            ec_spki,
+            ec_spki_len,
+            &fill,
+            priv3,
+            &np,
+            pub,
+            &nu
+        ) == CKR_DEVICE_ERROR,
+        "a P-256 SPKI for a P-384 target -> CKR_DEVICE_ERROR"
+    );
+    CHECK(
+        tsra_pkcs11_unwrap_private_build(
+            &t,
+            tmpl,
+            COUNT(tmpl),
+            spki,
+            spki_len - 1,
+            &fill,
+            priv,
+            &np,
+            pub,
+            &nu
+        ) == CKR_DEVICE_ERROR,
+        "a truncated SPKI -> CKR_DEVICE_ERROR"
+    );
+    CHECK(
+        (tsra_pkcs11_unwrap_private_build(
+             NULL,
+             tmpl,
+             COUNT(tmpl),
+             spki,
+             spki_len,
+             &fill,
+             priv,
+             &np,
+             pub,
+             &nu
+         ) == CKR_ARGUMENTS_BAD) &&
+            (tsra_pkcs11_unwrap_private_build(
+                 &t,
+                 NULL,
+                 1,
+                 spki,
+                 spki_len,
+                 &fill,
+                 priv,
+                 &np,
+                 pub,
+                 &nu
+             ) == CKR_ARGUMENTS_BAD) &&
+            (tsra_pkcs11_unwrap_private_build(
+                 &t,
+                 tmpl,
+                 COUNT(tmpl),
+                 NULL,
+                 spki_len,
+                 &fill,
+                 priv,
+                 &np,
+                 pub,
+                 &nu
+             ) == CKR_ARGUMENTS_BAD) &&
+            (tsra_pkcs11_unwrap_private_build(
+                 &t,
+                 tmpl,
+                 COUNT(tmpl),
+                 spki,
+                 spki_len,
+                 &fill,
+                 priv,
+                 &np,
+                 NULL,
+                 &nu
+             ) == CKR_ARGUMENTS_BAD),
+        "NULL arguments -> CKR_ARGUMENTS_BAD"
+    );
+}
+
 int main(void)
 {
     test_params();
@@ -936,7 +1737,11 @@ int main(void)
     test_pair_check();
     test_build();
     test_der_lengths();
+    test_alg_params();
     test_match();
+    test_private_windows();
+    test_private_check();
+    test_private_build();
     printf(
         g_fail ? "\nunwrap_params_test: FAILED (%d checks)\n"
                : "\nunwrap_params_test: all %d checks passed\n",

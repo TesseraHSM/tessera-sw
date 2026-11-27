@@ -161,22 +161,45 @@ and the result of the last hardware run.
 
 - Run: an over-long ECDSA digest on the PKA, the XTS key container, GCM keys
   unwrapped over MBOR, a 16-byte XTS tweak against an 8-byte little-endian
-  sector number, an XTS key with equal halves.
+  sector number, an XTS key with equal halves, ECDH on each curve with a
+  host peer, HKDF over its secret into AES-CBC and HMAC keys, and HMAC with
+  those keys over messages up to 1024 bytes.
 - Expect: the same results as on the emulator and the host references: the
   known-answer cases give the published answers, every invalid Wycheproof
   vector is refused, and the XTS key with equal halves unwraps but does not
-  encrypt.
+  encrypt. ECDH gives the host's secret, and HKDF reads it in the device's
+  byte order, as on the simulator: on an API 1.x device the x-coordinate
+  least significant byte first, P-521 zero-padded to 68 bytes. HKDF into each
+  HMAC key type succeeds; a firmware that does not write the requested HMAC
+  type into the derived key's masked blob fails that derive in the SDK. The
+  HMAC tags of keys derived from the NIST ECDH vectors equal the host's for
+  each hash, and a message of 1025 bytes is refused before the device.
 - Cases: `ec_sign.every_curve_and_hash_signs_what_the_host_verifies` (a
   64-byte hash on P-256 and P-384 is the over-long digest), `unwrap_kat.*`,
-  `unwrap.*`.
+  `unwrap.*`, `derive.*`, `hmac.*` (the `*_in_device_byte_order` cases pin
+  the byte order; if they fail while the standard order would match, the
+  firmware changed it, and those tests and the README deviation change with
+  it).
 - Result: not run yet.
 
-### H-l RSA decryption timing
+### H-l RSA keys: unwrap of each size, decryption timing
 
-- Run: time RSA decryption of valid and invalid PKCS#1 v1.5 and OAEP
-  ciphertexts (Bleichenbacher, Manger), and `C_UnwrapKey` with blobs that fail
-  in the OAEP block and in the key wrap. Optional before general availability.
-- Expect: no timing difference an attacker can use.
+- Run: `C_UnwrapKey` of a host RSA key of 2048, 3072 and 4096 bits and of an
+  EC key on each curve, as a signing and as a decrypting or deriving key; sign
+  and verify with every RSA mechanism, OAEP both ways, and the Wycheproof OAEP
+  and ECDH vectors. Then time `CKM_RSA_PKCS_OAEP` decryption of valid and
+  invalid ciphertexts (Manger: a bad leading byte, a bad label, a bad
+  padding), and `C_UnwrapKey` with blobs that fail in the OAEP block and in
+  the key wrap. The timing part is optional before general availability.
+- Expect: every size and curve unwraps with the blob lengths the README
+  names, the firmware's import self-test passes, the RSA private key is the
+  CRT kind, and the results match the emulator and the host (PKCS#1 v1.5
+  bit-exact). A peer point with x = 0 is refused as on the simulator, or the
+  README deviation goes. No timing difference an attacker can use: the module
+  answers every failed decryption alike, but the SDK removes the padding on
+  the host, so the time it takes is the device's and the SDK's.
+- Cases: `private_unwrap.*`, `rsa_sign.*`, `rsa_oaep.*`,
+  `derive.wycheproof_shared_secrets_match_in_device_byte_order`.
 - Result: not run yet.
 
 ### H-m External tools

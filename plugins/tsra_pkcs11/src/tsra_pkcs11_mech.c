@@ -4,24 +4,28 @@
 /*
  * The mechanism table (see tsra_pkcs11_mech.h). The device has no general RSA
  * key generation (CKM_RSA_PKCS_KEY_PAIR_GEN hands out its one unwrapping key
- * pair), no AES-ECB or CTR, no non-NIST curves and no SHA-3; the other
- * mechanisms it does have join the table when their entry points are
- * implemented.
+ * pair; RSA keys of the signature and OAEP rows arrive by unwrap), no AES-ECB
+ * or CTR, no non-NIST curves and no SHA-3; the other mechanisms it does have
+ * join the table when their entry points are implemented. CKM_RSA_PKCS is
+ * left out: the SDK removes the PKCS#1 v1.5 encryption padding on the host,
+ * which makes a padding oracle, and signs no caller-made DigestInfo.
  */
 
 #include "tsra_pkcs11_mech.h"
+#include "tsra_pkcs11_derive_params.h"
+#include "tsra_pkcs11_digest.h"
 #include "tsra_pkcs11_ec_template.h"
 #include "tsra_pkcs11_template.h"
 
 #include <stddef.h>
 
 /* The entry-point flags some entry point implements, the only ones a row may
- * carry besides the EC capability flags of an EC row. The piece that
- * implements another entry point (C_DeriveKey, ...) adds its flag here with its
+ * carry besides the EC capability flags of an EC row. A change that
+ * implements another entry point (C_WrapKey, ...) adds its flag here with its
  * rows. */
 #define P11_IMPLEMENTED_FLAGS                                                                      \
     (CKF_ENCRYPT | CKF_DECRYPT | CKF_DIGEST | CKF_SIGN | CKF_VERIFY | CKF_GENERATE |               \
-     CKF_GENERATE_KEY_PAIR | CKF_UNWRAP)
+     CKF_GENERATE_KEY_PAIR | CKF_UNWRAP | CKF_DERIVE)
 
 /* X(type, min_key, max_key, flags), one per implemented mechanism. */
 #define P11_MECHS(X)                                                                               \
@@ -43,7 +47,31 @@
     X(CKM_ECDSA_SHA384, EC_MIN_KEY_BITS, EC_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY | EC_MECH_FLAGS)   \
     X(CKM_ECDSA_SHA512, EC_MIN_KEY_BITS, EC_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY | EC_MECH_FLAGS)   \
     X(CKM_RSA_PKCS_KEY_PAIR_GEN, RSA_UNWRAP_KEY_BITS, RSA_UNWRAP_KEY_BITS, CKF_GENERATE_KEY_PAIR)  \
-    X(CKM_RSA_AES_KEY_WRAP, RSA_UNWRAP_KEY_BITS, RSA_UNWRAP_KEY_BITS, CKF_UNWRAP)
+    X(CKM_RSA_AES_KEY_WRAP, RSA_UNWRAP_KEY_BITS, RSA_UNWRAP_KEY_BITS, CKF_UNWRAP)                  \
+    X(CKM_ECDH1_DERIVE, EC_MIN_KEY_BITS, EC_MAX_KEY_BITS, CKF_DERIVE | EC_MECH_FLAGS)              \
+    X(CKM_HKDF_DERIVE, ECDH_SECRET_MIN_BYTES, ECDH_SECRET_MAX_BYTES, CKF_DERIVE)                   \
+    X(CKM_SHA1_RSA_PKCS, RSA_MIN_KEY_BITS, RSA_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY)                \
+    X(CKM_SHA256_RSA_PKCS, RSA_MIN_KEY_BITS, RSA_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY)              \
+    X(CKM_SHA384_RSA_PKCS, RSA_MIN_KEY_BITS, RSA_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY)              \
+    X(CKM_SHA512_RSA_PKCS, RSA_MIN_KEY_BITS, RSA_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY)              \
+    X(CKM_RSA_PKCS_PSS, RSA_MIN_KEY_BITS, RSA_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY)                 \
+    X(CKM_SHA1_RSA_PKCS_PSS, RSA_MIN_KEY_BITS, RSA_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY)            \
+    X(CKM_SHA256_RSA_PKCS_PSS, RSA_MIN_KEY_BITS, RSA_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY)          \
+    X(CKM_SHA384_RSA_PKCS_PSS, RSA_MIN_KEY_BITS, RSA_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY)          \
+    X(CKM_SHA512_RSA_PKCS_PSS, RSA_MIN_KEY_BITS, RSA_MAX_KEY_BITS, CKF_SIGN | CKF_VERIFY)          \
+    X(CKM_RSA_PKCS_OAEP, RSA_MIN_KEY_BITS, RSA_MAX_KEY_BITS, CKF_ENCRYPT | CKF_DECRYPT)            \
+    X(CKM_SHA256_HMAC,                                                                             \
+      TSRA_PKCS11_SHA256_DIGEST_LEN,                                                               \
+      TSRA_PKCS11_SHA256_DIGEST_LEN,                                                               \
+      CKF_SIGN | CKF_VERIFY)                                                                       \
+    X(CKM_SHA384_HMAC,                                                                             \
+      TSRA_PKCS11_SHA384_DIGEST_LEN,                                                               \
+      TSRA_PKCS11_SHA384_DIGEST_LEN,                                                               \
+      CKF_SIGN | CKF_VERIFY)                                                                       \
+    X(CKM_SHA512_HMAC,                                                                             \
+      TSRA_PKCS11_SHA512_DIGEST_LEN,                                                               \
+      TSRA_PKCS11_SHA512_DIGEST_LEN,                                                               \
+      CKF_SIGN | CKF_VERIFY)
 
 #define P11_MECH_ROW(t, lo, hi, f) { (t), (lo), (hi), (f) },
 

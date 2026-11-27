@@ -41,7 +41,7 @@ test passes that is neither listed nor in `baseline.txt`: that test belongs on
 the list. The nightly workflow runs it.
 
 Measured on the socket simulator (2026-11-18, a shared 8-core host): `--pr`
-305 tests in 85 s, the gate 1012 tests in 176 s, `--full` about 4 minutes.
+313 tests in 110 s, the gate 1017 tests in 144 s, `--full` about 5 minutes.
 
 ## The include-list and the baseline
 
@@ -53,7 +53,7 @@ this module:
 | tag | why it is off the list |
 |---|---|
 | `rng` | Tests of the generator itself that go through the patched helper below, so they pass on host bytes. |
-| `presence-only` | Claim that a token key persists, but only find the object again. Key survival needs the key used, which the GoogleTest suite does (`key_survival.*`). |
+| `presence-only` | Claim that a token key persists, but only find the object again, or only find a mechanism in the mechanism list. Key survival needs the key used, which the GoogleTest suite does (`key_survival.*`), and so does a mechanism. |
 | `tool` | Check pkcs11-check's own tables, not the module. |
 | `environment` | Depend on host tools (p11-kit) the gate does not pin, or on how much memory the host can map: a count of 2^32 is checked only where the host can map the array it claims, and is a note elsewhere. |
 | `timing` | Benchmarks and timing ratios: no verdict, or flaky on shared runners. |

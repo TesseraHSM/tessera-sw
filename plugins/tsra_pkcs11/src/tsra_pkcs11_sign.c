@@ -9,14 +9,20 @@
  * signature length there, and the data calls follow the lifetime rules of the
  * cipher operations (tsra_pkcs11_crypt.c): a NULL output buffer or a
  * too-small one keeps the operation for the retry, every other outcome ends
- * it, and one operation does not mix one-shot and multi-part calls.
+ * it, and one operation does not mix one-shot and multi-part calls. An HMAC
+ * runs on one secret key in both directions, and its verify compares the tag
+ * here (mac_verify) rather than in the SDK.
  */
 
+#include "tsra_pkcs11_digest.h"
 #include "tsra_pkcs11_ec_template.h"
 #include "tsra_pkcs11_internal.h"
 #include "tsra_pkcs11_key.h"
+#include "tsra_pkcs11_rsa_params.h"
 #include "tsra_pkcs11_template.h"
+#include "tsra_pkcs11_wipe.h"
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -28,6 +34,10 @@ typedef struct
     uint32_t hsm_other; /* the other half of an unmasked pair; owned, unused */
     uint32_t stream;    /* SDK stream context once a multi-part call ran; 0 = none */
     CK_ULONG sig_len;   /* the signature length for this key and mechanism */
+    bool is_pss;        /* a PSS mechanism, whose parameters are `pss` */
+    CK_RSA_PKCS_PSS_PARAMS pss;
+    bool mac;         /* an HMAC mechanism */
+    CK_ULONG mac_fed; /* HMAC: the message bytes the multi-part calls fed so far */
 } sign_op;
 
 void tsra_pkcs11_sign_op_free(void *op_ctx)
@@ -41,6 +51,35 @@ void tsra_pkcs11_sign_op_free(void *op_ctx)
     tsra_pkcs11_key_release(op->hsm_key);
     tsra_pkcs11_key_release(op->hsm_other);
     free(op);
+}
+
+/* The HMAC key types: the device kind to unmask a key as, and the tag length,
+ * which is the hash length (api/lib HsmHmacKey::validate_props makes the key
+ * as long as the hash). */
+typedef struct
+{
+    CK_KEY_TYPE key_type;
+    tsra_pkcs11_key_kind_t kind;
+    CK_ULONG tag_len;
+} hmac_info;
+
+static const hmac_info HMAC_KEYS[] = {
+    { CKK_SHA256_HMAC, TSRA_PKCS11_KIND_HMAC_SHA256, TSRA_PKCS11_SHA256_DIGEST_LEN },
+    { CKK_SHA384_HMAC, TSRA_PKCS11_KIND_HMAC_SHA384, TSRA_PKCS11_SHA384_DIGEST_LEN },
+    { CKK_SHA512_HMAC, TSRA_PKCS11_KIND_HMAC_SHA512, TSRA_PKCS11_SHA512_DIGEST_LEN },
+};
+
+/* The HMAC_KEYS row of `kt`, or NULL for a key type that is not HMAC. */
+static const hmac_info *find_hmac(CK_KEY_TYPE kt)
+{
+    for (size_t i = 0; i < (sizeof(HMAC_KEYS) / sizeof(HMAC_KEYS[0])); i++)
+    {
+        if (HMAC_KEYS[i].key_type == kt)
+        {
+            return &HMAC_KEYS[i];
+        }
+    }
+    return NULL;
 }
 
 /* The mechanism and direction check_key decides on. */
@@ -66,7 +105,8 @@ static CK_RV key_attr(
 /*
  * Whether the key may run the mechanism in the direction asked: a key of the
  * mechanism's type, a private key with CKA_SIGN or a public key with
- * CKA_VERIFY, and the mechanism on its CKA_ALLOWED_MECHANISMS if it has one.
+ * CKA_VERIFY (for HMAC, a secret key with the same flag), and the mechanism
+ * on its CKA_ALLOWED_MECHANISMS if it has one.
  * A missing or malformed attribute permits nothing. The store runs it on the
  * record it returns the body from, so a record rewritten in between cannot
  * pass the check with one version and supply the body from another.
@@ -97,7 +137,12 @@ static CK_RV check_key(void *cctx, tsra_pkcs11_objstore_reader read, void *rctx)
     {
         return CKR_KEY_TYPE_INCONSISTENT;
     }
-    if ((cls != (sign ? CKO_PRIVATE_KEY : CKO_PUBLIC_KEY)) || !allowed)
+    CK_OBJECT_CLASS want = sign ? CKO_PRIVATE_KEY : CKO_PUBLIC_KEY;
+    if (find_hmac(kt) != NULL)
+    {
+        want = CKO_SECRET_KEY; /* one key for both directions */
+    }
+    if ((cls != want) || !allowed)
     {
         return CKR_KEY_FUNCTION_NOT_PERMITTED;
     }
@@ -146,6 +191,32 @@ static CK_RV bind_key(
         op->sig_len = 2 * tsra_pkcs11_ec_coord_len(curve); /* r || s */
         return CKR_OK;
     }
+    case CKK_RSA: {
+        uint32_t priv = 0;
+        uint32_t pub = 0;
+        CK_ULONG bits = 0;
+        CK_RV rv = tsra_pkcs11_key_rsa_unmask(hsm_session, body, body_len, &priv, &pub, &bits);
+        if (rv != CKR_OK)
+        {
+            return rv;
+        }
+        op->hsm_key = sign ? priv : pub;
+        op->hsm_other = sign ? pub : priv;
+        op->sig_len = bits / CHAR_BIT; /* the device's sizes are whole bytes */
+        return CKR_OK;
+    }
+    case CKK_SHA256_HMAC:
+    case CKK_SHA384_HMAC:
+    case CKK_SHA512_HMAC: {
+        const hmac_info *h = find_hmac(op->sm->key_type);
+        if (h == NULL)
+        {
+            return CKR_KEY_TYPE_INCONSISTENT; /* defensive: HMAC_KEYS lists all three */
+        }
+        op->mac = true;
+        op->sig_len = h->tag_len;
+        return tsra_pkcs11_key_hmac_unmask(hsm_session, h->kind, body, body_len, &op->hsm_key);
+    }
     default:
         return CKR_KEY_TYPE_INCONSISTENT;
     }
@@ -179,6 +250,8 @@ static CK_RV sign_init(
      * operation state, mechanism and its parameter, then login state. */
     CK_RV rv = CKR_OK;
     const tsra_pkcs11_sign_mech *sm = NULL;
+    CK_RSA_PKCS_PSS_PARAMS pss;
+    bool is_pss = false;
     if (s->op != P11_OP_NONE)
     {
         rv = CKR_OPERATION_ACTIVE;
@@ -187,9 +260,9 @@ static CK_RV sign_init(
     {
         rv = CKR_MECHANISM_INVALID;
     }
-    else if ((pMechanism->pParameter != NULL_PTR) || (pMechanism->ulParameterLen != 0))
+    else
     {
-        rv = CKR_MECHANISM_PARAM_INVALID;
+        rv = tsra_pkcs11_sign_params_check(pMechanism, &pss, &is_pss);
     }
     if (rv != CKR_OK)
     {
@@ -224,9 +297,21 @@ static CK_RV sign_init(
     }
     if ((rv == CKR_OK) && (body_len == 0))
     {
-        /* An object with no masked body (a data object, or a public key made
-         * with C_CreateObject) backs no device key. */
-        rv = CKR_KEY_HANDLE_INVALID;
+        /* An object with no masked body (a data object, a public key made with
+         * C_CreateObject, the unwrapping key pair) backs no device key. A key
+         * that lacks the usage is told so rather than about its handle; both
+         * reads end in a refusal, so no decision rests on two reads. */
+        CK_RV check = g_tsra_pkcs11.store.ops->get_key_body(
+            g_tsra_pkcs11.store.ctx,
+            s->slot,
+            CK_TRUE,
+            hKey,
+            NULL,
+            &body_len,
+            check_key,
+            &kc
+        );
+        rv = (check == CKR_KEY_FUNCTION_NOT_PERMITTED) ? check : CKR_KEY_HANDLE_INVALID;
     }
     if (rv != CKR_OK)
     {
@@ -260,9 +345,18 @@ static CK_RV sign_init(
         goto cleanup;
     }
     op->sm = sm;
+    op->is_pss = is_pss;
+    op->pss = pss;
     rv = bind_key(op, slot->hsm_session, want == P11_OP_SIGN, body, body_len);
     if (rv != CKR_OK)
     {
+        goto cleanup;
+    }
+    /* The PSS salt is a parameter error, but only the key tells whether it
+     * fits (the mechanism checks above ran before the key was read). */
+    if (is_pss && !tsra_pkcs11_pss_salt_ok(op->sig_len * CHAR_BIT, &pss))
+    {
+        rv = CKR_MECHANISM_PARAM_INVALID;
         goto cleanup;
     }
     s->op_ctx = op;
@@ -332,25 +426,42 @@ static CK_RV op_done(tsra_pkcs11_session_t *s, bool keep, CK_RV rv)
 }
 
 /* The length verdict on the data of a one-shot call: the device buffers are
- * 32-bit, and CKM_ECDSA takes only the hash lengths the SDK recognises. */
+ * 32-bit, CKM_ECDSA takes only the hash lengths the SDK recognises,
+ * CKM_RSA_PKCS_PSS exactly one hash of its parameters' hashAlg, and an HMAC
+ * at most HMAC_MAX_DATA_LEN bytes (checked here: the SDK's refusal,
+ * INDEX_OUT_OF_RANGE, would reach the caller as CKR_ARGUMENTS_BAD). */
 static CK_RV data_len_check(const sign_op *op, CK_ULONG len)
 {
-    if ((len > (CK_ULONG)UINT32_MAX) ||
-        ((op->sm->mech == CKM_ECDSA) && !tsra_pkcs11_ecdsa_raw_len_ok(len)))
-    {
-        return CKR_DATA_LEN_RANGE;
-    }
-    return CKR_OK;
+    bool raw_ecdsa = (op->sm->mech == CKM_ECDSA) && !tsra_pkcs11_ecdsa_raw_len_ok(len);
+    bool pre_hashed =
+        (op->sm->mech == CKM_RSA_PKCS_PSS) && (len != tsra_pkcs11_digest_mech_len(op->pss.hashAlg));
+    bool mac_long = op->mac && (len > HMAC_MAX_DATA_LEN);
+    return ((len > (CK_ULONG)UINT32_MAX) || raw_ecdsa || pre_hashed || mac_long)
+               ? CKR_DATA_LEN_RANGE
+               : CKR_OK;
 }
 
-/* Open the operation's SDK stream unless a multi-part call already did. */
+/* The PSS parameters for the binding layer, NULL for a mechanism without them. */
+static const CK_RSA_PKCS_PSS_PARAMS *pss_of(const sign_op *op)
+{
+    return op->is_pss ? &op->pss : NULL;
+}
+
+/* Open the operation's SDK stream unless a multi-part call already did. An
+ * HMAC verify opens a sign stream (mac_verify). */
 static CK_RV stream_open(sign_op *op, bool sign)
 {
     if (op->stream != 0)
     {
         return CKR_OK;
     }
-    return tsra_pkcs11_key_sign_stream_new(sign, op->sm->mech, op->hsm_key, &op->stream);
+    return tsra_pkcs11_key_sign_stream_new(
+        sign || op->mac,
+        op->sm->mech,
+        pss_of(op),
+        op->hsm_key,
+        &op->stream
+    );
 }
 
 /*
@@ -413,9 +524,51 @@ CK_RV C_Sign(
         return op_done(s, true, rv);
     }
     CK_ULONG n = op->sig_len;
-    rv = tsra_pkcs11_key_sign(op->sm->mech, op->hsm_key, pData, ulDataLen, pSignature, &n);
+    rv = tsra_pkcs11_key_sign(
+        op->sm->mech,
+        pss_of(op),
+        op->hsm_key,
+        pData,
+        ulDataLen,
+        pSignature,
+        &n
+    );
     *pulSignatureLen = (rv == CKR_OK) ? n : 0;
     return op_done(s, false, rv);
+}
+
+/*
+ * The HMAC verify: the device computes the tag, one-shot over `in` or by
+ * finishing the operation's sign stream (`stream`), and it is compared with
+ * the caller's `sig` here, in constant time. The SDK's HMAC verify compares
+ * with `==`, which may stop at the first byte that differs. Signing is open
+ * to every key that verifies: an HMAC key's device key carries both usages
+ * (tsra_pkcs11_key_hkdf derives it so), and CKA_VERIFY was checked at the
+ * init. The caller checked `sig_len` against op->sig_len.
+ */
+static CK_RV mac_verify(
+    sign_op *op,
+    bool stream,
+    const CK_BYTE *in,
+    CK_ULONG in_len,
+    const CK_BYTE *sig,
+    CK_ULONG sig_len
+)
+{
+    CK_BYTE tag[TSRA_PKCS11_DIGEST_MAX_LEN]; /* the longest tag, HMAC-SHA-512's */
+    CK_ULONG n = sizeof(tag);
+    CK_RV rv = stream ? tsra_pkcs11_key_sign_stream_final(op->stream, tag, &n)
+                      : tsra_pkcs11_key_sign(op->sm->mech, NULL, op->hsm_key, in, in_len, tag, &n);
+    if ((rv == CKR_OK) && (n != sig_len))
+    {
+        rv = CKR_FUNCTION_FAILED; /* the device's tag is not as long as the key's */
+    }
+    if ((rv == CKR_OK) && !tsra_pkcs11_equal_ct(tag, sig, n))
+    {
+        rv = CKR_SIGNATURE_INVALID;
+    }
+    tsra_pkcs11_wipe(tag, sizeof(tag)); /* the valid tag would forge this message */
+    return rv;
 }
 
 /* Shared C_SignUpdate / C_VerifyUpdate body. */
@@ -449,9 +602,10 @@ static CK_RV sign_update(
     {
         rv = CKR_FUNCTION_NOT_SUPPORTED; /* the SDK streams no caller-made hash */
     }
-    else if (ulPartLen > (CK_ULONG)UINT32_MAX)
+    else if ((ulPartLen > (CK_ULONG)UINT32_MAX) ||
+             (op->mac && (ulPartLen > HMAC_MAX_DATA_LEN - op->mac_fed)))
     {
-        rv = CKR_DATA_LEN_RANGE;
+        rv = CKR_DATA_LEN_RANGE; /* for HMAC, the parts so far plus this one */
     }
     else
     {
@@ -459,7 +613,12 @@ static CK_RV sign_update(
         rv = stream_open(op, sign);
         if ((rv == CKR_OK) && (ulPartLen > 0))
         {
-            rv = tsra_pkcs11_key_sign_stream_update(sign, op->stream, pPart, ulPartLen);
+            bool signs = sign || op->mac; /* an HMAC verify feeds a sign stream */
+            rv = tsra_pkcs11_key_sign_stream_update(signs, op->stream, pPart, ulPartLen);
+        }
+        if ((rv == CKR_OK) && op->mac)
+        {
+            op->mac_fed += ulPartLen; /* at most HMAC_MAX_DATA_LEN, checked above */
         }
     }
     return op_done(s, rv == CKR_OK, rv);
@@ -553,10 +712,15 @@ CK_RV C_Verify(
     {
         rv = CKR_SIGNATURE_LEN_RANGE;
     }
-    if (rv == CKR_OK)
+    if ((rv == CKR_OK) && op->mac)
+    {
+        rv = mac_verify(op, false, pData, ulDataLen, pSignature, ulSignatureLen);
+    }
+    else if (rv == CKR_OK)
     {
         rv = tsra_pkcs11_key_verify(
             op->sm->mech,
+            pss_of(op),
             op->hsm_key,
             pData,
             ulDataLen,
@@ -601,7 +765,11 @@ CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pSignature, CK_ULONG
     {
         rv = stream_open(op, false);
     }
-    if (rv == CKR_OK)
+    if ((rv == CKR_OK) && op->mac)
+    {
+        rv = mac_verify(op, true, NULL, 0, pSignature, ulSignatureLen);
+    }
+    else if (rv == CKR_OK)
     {
         rv = tsra_pkcs11_key_verify_stream_final(op->stream, pSignature, ulSignatureLen);
     }

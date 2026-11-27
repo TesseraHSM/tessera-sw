@@ -7,13 +7,14 @@
  * (src/tsra_pkcs11_digest.c), the cipher and sign tables and the
  * key-generation template check (src/tsra_pkcs11_template.c), the EC
  * key-pair template check (src/tsra_pkcs11_ec_template.c), and the unwrapping
- * key pair and unwrap checks (src/tsra_pkcs11_unwrap_params.c). No device, no
- * libcrypto:
+ * key pair and unwrap checks (src/tsra_pkcs11_unwrap_params.c), and the derive
+ * check (src/tsra_pkcs11_derive_params.c). No device, no libcrypto:
  *
  *   gcc -I ../include/pkcs11-v3.1 -I ../src mech_table_test.c \
  *       ../src/tsra_pkcs11_mech.c ../src/tsra_pkcs11_template.c \
  *       ../src/tsra_pkcs11_attr_types.c ../src/tsra_pkcs11_digest.c \
  *       ../src/tsra_pkcs11_ec_template.c ../src/tsra_pkcs11_unwrap_params.c \
+ *       ../src/tsra_pkcs11_derive_params.c \
  *       -o mech_table_test && ./mech_table_test
  *
  * Both directions: every row advertises exactly the flags its arms implement,
@@ -21,6 +22,7 @@
  * an arm without its row, fails here.
  */
 
+#include "tsra_pkcs11_derive_params.h"
 #include "tsra_pkcs11_digest.h"
 #include "tsra_pkcs11_ec_template.h"
 #include "tsra_pkcs11_mech.h"
@@ -96,6 +98,12 @@ static CK_FLAGS arm_flags(CK_MECHANISM_TYPE t)
     {
         f |= CKF_UNWRAP;
     }
+    tsra_pkcs11_derive_params derive;
+    if (tsra_pkcs11_derive_params_check(&m, &derive) != CKR_MECHANISM_INVALID)
+    {
+        /* A derivation from an EC key also reports what EC it handles. */
+        f |= CKF_DERIVE | ((derive.base_key_type == CKK_EC) ? EC_MECH_FLAGS : 0);
+    }
     return f;
 }
 
@@ -158,11 +166,45 @@ static void test_sweep(void)
         tsra_pkcs11_mech_find(CKM_GENERIC_SECRET_KEY_GEN) == NULL,
         "CKM_GENERIC_SECRET_KEY_GEN is not advertised"
     );
+    CHECK(
+        tsra_pkcs11_mech_find(CKM_SP800_108_COUNTER_KDF) == NULL,
+        "CKM_SP800_108_COUNTER_KDF is not advertised"
+    );
+    const tsra_pkcs11_mech_t *hkdf = tsra_pkcs11_mech_find(CKM_HKDF_DERIVE);
+    CHECK(
+        (hkdf != NULL) && (hkdf->min_key == tsra_pkcs11_ec_coord_len(TSRA_PKCS11_CURVE_P256)) &&
+            (hkdf->max_key == tsra_pkcs11_ec_coord_len(TSRA_PKCS11_CURVE_P521)),
+        "CKM_HKDF_DERIVE takes the ECDH secrets, 32 to 66 bytes"
+    );
     const tsra_pkcs11_mech_t *ec = tsra_pkcs11_mech_find(CKM_ECDSA_SHA256);
     CHECK(
         (ec != NULL) && ((ec->flags & CKF_EC_F_P) != 0) && ((ec->flags & CKF_EC_OID) != 0) &&
             ((ec->flags & CKF_EC_UNCOMPRESS) != 0),
         "an EC row names prime-field curves, by OID, with uncompressed points"
+    );
+    const tsra_pkcs11_mech_t *pss = tsra_pkcs11_mech_find(CKM_SHA256_RSA_PKCS_PSS);
+    CHECK(
+        (pss != NULL) && (pss->min_key == RSA_MIN_KEY_BITS) && (pss->max_key == RSA_MAX_KEY_BITS) &&
+            ((pss->flags & EC_MECH_FLAGS) == 0),
+        "an RSA row takes the unwrapped key sizes, 2048 to 4096 bits, and has no EC flags"
+    );
+    const tsra_pkcs11_mech_t *oaep = tsra_pkcs11_mech_find(CKM_RSA_PKCS_OAEP);
+    CHECK(
+        (oaep != NULL) && (oaep->flags == (CKF_ENCRYPT | CKF_DECRYPT)),
+        "CKM_RSA_PKCS_OAEP encrypts and decrypts, and wraps nothing"
+    );
+    const tsra_pkcs11_mech_t *hmac = tsra_pkcs11_mech_find(CKM_SHA384_HMAC);
+    CHECK(
+        (hmac != NULL) && (hmac->min_key == TSRA_PKCS11_SHA384_DIGEST_LEN) &&
+            (hmac->max_key == TSRA_PKCS11_SHA384_DIGEST_LEN) &&
+            (hmac->flags == (CKF_SIGN | CKF_VERIFY)),
+        "an HMAC row signs and verifies with a key as long as its hash, in bytes"
+    );
+    CHECK(
+        (tsra_pkcs11_mech_find(CKM_SHA_1_HMAC) == NULL) &&
+            (tsra_pkcs11_mech_find(CKM_SHA224_HMAC) == NULL) &&
+            (tsra_pkcs11_mech_find(CKM_SHA256_HMAC_GENERAL) == NULL),
+        "SHA-1 and SHA-224 HMAC and the _GENERAL variants are not advertised"
     );
     const tsra_pkcs11_mech_t *aes = tsra_pkcs11_mech_find(CKM_AES_CBC);
     CHECK((aes != NULL) && ((aes->flags & EC_MECH_FLAGS) == 0), "an AES row has no EC flags");
