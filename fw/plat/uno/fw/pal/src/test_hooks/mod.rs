@@ -27,6 +27,8 @@
 //! - [`test_action`] — the `TestAction` (`DdiOp` 2004) handler.
 //! - [`get_priv_key`] / [`raw_key_import`] — FIPS-validation action handlers.
 //! - [`get_rng`] — the `GetRng` FIPS-validation action handler.
+//! - [`force_pka_instance`] — the `ForcePkaInstance` FIPS-validation action
+//!   handler.
 //!
 //! # Test hooks are in-session commands
 //!
@@ -52,6 +54,10 @@
 //! and 27, respectively, enabled only by `fips_validation_hooks`. Their legacy
 //! standalone opcodes 2005, 2008, and 2007 are not accepted. The host package
 //! and firmware must use the same action selectors and payload schemas.
+//!
+//! `ForcePkaInstance` uses TestAction value 12, enabled only by
+//! `fips_validation_hooks`. Its payload is `{1: force_pka_instance: u8}` to
+//! pin any-engine PKA work to that UPKA engine, or empty to release the pin.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -61,6 +67,8 @@ use core::task::Poll;
 #[cfg(feature = "tsra_test_hooks")]
 mod clear_user_credentials;
 mod common;
+#[cfg(feature = "fips_validation_hooks")]
+mod force_pka_instance;
 #[cfg(feature = "fips_validation_hooks")]
 mod get_priv_key;
 #[cfg(feature = "fips_validation_hooks")]
