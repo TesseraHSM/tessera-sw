@@ -126,6 +126,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
                 } else {
                     (1u64 << TICKETS) - 1
                 },
+                #[cfg(feature = "fips_validation_hooks")]
+                forced_engine: None,
             }),
         }
     }
@@ -188,6 +190,32 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Engine index is out of range.
     pub async fn acquire_engine(&self, target: u8) -> HsmResult<UpkaEngine<'_, DEPTH, ENGINES>> {
         self.scheduler().acquire_engine(target).await
+    }
+
+    /// Pin any-engine work to one engine, or release the pin.
+    ///
+    /// FIPS-validation hook. While pinned, [`acquire_any`](Self::acquire_any),
+    /// [`with_engine`](Self::with_engine) and the staged commands run only on
+    /// `engine`, queueing while it is busy. Specific-engine requests (self
+    /// tests, wipes) are unaffected, as is work already running. The pin is
+    /// held in RAM only and lasts until changed or the firmware restarts.
+    ///
+    /// # Parameters
+    ///
+    /// - `engine`: `Some(id)` to pin to engine `id`; `None` to release.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())`: The pin was updated.
+    /// - `Err(UpkaError::CMD_ERROR)`: Engine index is out of range; the
+    ///   current pin is unchanged.
+    #[cfg(feature = "fips_validation_hooks")]
+    pub fn force_engine(&self, engine: Option<u8>) -> HsmResult<()> {
+        if engine.is_some_and(|id| usize::from(id) >= ENGINES) {
+            return Err(crate::UpkaError::CMD_ERROR);
+        }
+        self.state.with(|s| s.set_forced_engine(engine));
+        Ok(())
     }
 
     /// Sign a digest using ECDSA.

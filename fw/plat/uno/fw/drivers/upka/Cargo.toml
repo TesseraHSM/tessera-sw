@@ -24,5 +24,11 @@ tsra_fw_uno_pac = { workspace = true }
 tsra_fw_uno_reg_soc = { workspace = true }
 zerocopy = { features = ["derive"], workspace = true }
 
+[features]
+default = []
+# FIPS validation only: lets a test hook pin any-engine work to one engine
+# (`UpkaDriver::force_engine`). Never enable in a production build.
+fips_validation_hooks = []
+
 [lints]
 workspace = true

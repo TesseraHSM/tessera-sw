@@ -282,6 +282,12 @@ pub(crate) struct UpkaState<const DEPTH: usize, const ENGINES: usize> {
 
     /// Bitmask of free tickets.
     pub(crate) ticket_free: u64,
+
+    /// FIPS-validation pin: when set, any-engine requests (direct or
+    /// staged) are served only by this engine. Specific-engine requests
+    /// are unaffected.
+    #[cfg(feature = "fips_validation_hooks")]
+    pub(crate) forced_engine: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,12 +321,22 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
         false
     }
 
+    /// Bitmask of free engines that may serve an any-engine request.
+    fn eligible_free_mask(&self) -> u16 {
+        #[cfg(feature = "fips_validation_hooks")]
+        if let Some(id) = self.forced_engine {
+            return self.free_mask & (1u16 << id);
+        }
+        self.free_mask
+    }
+
     pub(crate) fn try_claim_free_engine(&mut self, awaiting_completion: bool) -> Option<u8> {
-        if self.free_mask == 0 {
+        let eligible = self.eligible_free_mask();
+        if eligible == 0 {
             return None;
         }
 
-        let id = self.free_mask.trailing_zeros() as u8;
+        let id = eligible.trailing_zeros() as u8;
         self.free_mask &= !(1u16 << id);
         self.engine_slots[id as usize].mark_in_use(awaiting_completion);
         Some(id)
@@ -371,6 +387,12 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
 
         self.free_mask |= 1u16 << id;
 
+        // An engine outside the FIPS-validation pin stays free and is not
+        // handed to an any-engine waiter.
+        if self.eligible_free_mask() & (1u16 << id) == 0 {
+            return None;
+        }
+
         let mut cursor = self.queue_head;
         while cursor != self.queue_tail {
             let idx = Self::queue_index(cursor);
@@ -400,6 +422,25 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaState<DEPTH, ENGINES> {
         }
 
         None
+    }
+
+    /// Pin any-engine requests to `engine`, or release the pin with `None`.
+    ///
+    /// Work already running is unaffected. Waiters queued behind the old pin
+    /// are handed to newly eligible free engines at once, since no release
+    /// may come to wake them otherwise.
+    #[cfg(feature = "fips_validation_hooks")]
+    pub(crate) fn set_forced_engine(&mut self, engine: Option<u8>) {
+        self.forced_engine = engine;
+
+        let mut eligible = self.eligible_free_mask();
+        while eligible != 0 && self.has_any_waiters() {
+            let id = eligible.trailing_zeros() as u8;
+            eligible &= !(1u16 << id);
+            // The engine is already free and idle (a free engine never has a
+            // specific waiter), so this only dispatches the head waiter to it.
+            let _ = self.release_engine_and_dispatch(id);
+        }
     }
 
     /// Run `cmd` on any engine: start it now if one is free and nothing is

@@ -12,9 +12,7 @@
 use tsra_fw_ddi_mbor::MborDecode;
 use tsra_fw_ddi_mbor::MborDecoder;
 use tsra_fw_ddi_mbor::MborMap;
-#[cfg(feature = "tsra_test_hooks")]
 use tsra_fw_ddi_mbor_derive::Ddi;
-#[cfg(feature = "tsra_test_hooks")]
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -23,10 +21,10 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 #[cfg(feature = "tsra_test_hooks")]
 use super::clear_user_credentials;
 use super::common::ReqHdr;
-#[cfg(feature = "tsra_test_hooks")]
 use super::common::encode_resp;
-#[cfg(feature = "tsra_test_hooks")]
 use super::common::success_hdr;
+#[cfg(feature = "fips_validation_hooks")]
+use super::force_pka_instance;
 #[cfg(feature = "fips_validation_hooks")]
 use super::get_priv_key;
 #[cfg(feature = "fips_validation_hooks")]
@@ -44,7 +42,6 @@ use crate::pal::UnoHsmPal;
 pub(super) const TEST_ACTION_PAYLOAD_MAX: usize = 3584;
 
 /// The response data shared by `TestAction` variants.
-#[cfg(feature = "tsra_test_hooks")]
 #[derive(Debug, Ddi)]
 #[ddi(map)]
 struct DdiTestActionResp {
@@ -64,6 +61,9 @@ enum SupportedTestAction {
     /// Inject a crash into the HSM/Admin/FP cores.
     #[cfg(feature = "tsra_test_hooks")]
     TriggerCrash = 8,
+    /// Pin any-engine PKA work to one UPKA engine, or release the pin.
+    #[cfg(feature = "fips_validation_hooks")]
+    ForcePkaInstance = 12,
     /// Clear the partition's stored user credential.
     #[cfg(feature = "tsra_test_hooks")]
     ClearUserCredentials = 18,
@@ -94,6 +94,10 @@ impl TryFrom<u32> for SupportedTestAction {
         #[cfg(feature = "tsra_test_hooks")]
         if value == Self::TriggerCrash as u32 {
             return Ok(Self::TriggerCrash);
+        }
+        #[cfg(feature = "fips_validation_hooks")]
+        if value == Self::ForcePkaInstance as u32 {
+            return Ok(Self::ForcePkaInstance);
         }
         #[cfg(feature = "tsra_test_hooks")]
         if value == Self::ClearUserCredentials as u32 {
@@ -143,6 +147,11 @@ pub(super) async fn dispatch<'p>(
             trigger_crash::dispatch(pal, decoder, selector.request_field_count, request_len)
                 .await
                 .map(|never| match never {})
+        }
+        #[cfg(feature = "fips_validation_hooks")]
+        SupportedTestAction::ForcePkaInstance => {
+            let payload = decode_payload_bytes(decoder, selector.request_field_count, request_len)?;
+            force_pka_instance::dispatch(pal, io, hdr, payload)
         }
         #[cfg(feature = "fips_validation_hooks")]
         SupportedTestAction::GetPrivKey => {
@@ -256,7 +265,6 @@ fn decode_payload_bytes<'a>(
 }
 
 /// Encode a successful action response with no action-specific result.
-#[cfg(feature = "tsra_test_hooks")]
 pub(super) fn encode_success<'p>(
     pal: &'p UnoHsmPal,
     io: &UnoHsmIo,
