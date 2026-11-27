@@ -49,4 +49,42 @@ struct WycheproofGcm
     bool valid;
 };
 
+/// An ECDH peer's public point (SEC 1, as CK_ECDH1_DERIVE_PARAMS takes it) on
+/// curve ("P-256", ...). `valid` is whether the token takes it: invalid points
+/// and compressed ones are refused, whatever Wycheproof says of the latter.
+struct WycheproofEcPoint
+{
+    int tc_id;
+    const char *curve;
+    const char *pub;
+    bool valid;
+};
+
+/// A valid ECDH vector: the peer's uncompressed point `pub` and the private
+/// scalar `priv` (big-endian, as an ASN.1 INTEGER's content: a leading zero
+/// byte or fewer bytes than the order are possible) agree on `shared`, the
+/// big-endian x-coordinate.
+struct WycheproofEcdh
+{
+    int tc_id;
+    const char *curve;
+    const char *pub;
+    const char *priv;
+    const char *shared;
+};
+
+/// An RSA-OAEP decryption: `ct` decrypts to `msg` under `label` with the
+/// PKCS#8 key `pkcs8`, `md` the OAEP and the MGF1 hash; an invalid one does
+/// not decrypt.
+struct WycheproofOaep
+{
+    int tc_id;
+    const char *md;
+    const char *pkcs8;
+    const char *msg;
+    const char *label;
+    const char *ct;
+    bool valid;
+};
+
 } // namespace vectors

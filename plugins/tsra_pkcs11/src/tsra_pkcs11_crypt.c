@@ -5,8 +5,8 @@
  * Key-backed operations: C_GenerateKey (CKM_AES_KEY_GEN, CKM_AES_XTS_KEY_GEN),
  * C_GenerateKeyPair (CKM_EC_KEY_PAIR_GEN here, the RSA unwrapping key pair in
  * tsra_pkcs11_unwrap.c) and AES-CBC / AES-CBC-PAD / AES-GCM / AES-XTS
- * encrypt/decrypt, one-shot and multi-part. Sign and verify are in
- * tsra_pkcs11_sign.c.
+ * encrypt/decrypt, one-shot and multi-part, and CKM_RSA_PKCS_OAEP, one-shot
+ * only. Sign and verify are in tsra_pkcs11_sign.c.
  *
  * The TSRA device holds keys only as session-scoped handles; the durable form
  * is the opaque masked blob. So C_GenerateKey stores that blob as the object's
@@ -21,8 +21,10 @@
 #include "tsra_pkcs11_ec_template.h"
 #include "tsra_pkcs11_internal.h"
 #include "tsra_pkcs11_key.h"
+#include "tsra_pkcs11_rsa_params.h"
 #include "tsra_pkcs11_template.h"
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,12 +46,15 @@ _Static_assert(AES_XTS_TWEAK_LEN <= AES_BLOCK_LEN, "the XTS tweak must fit the I
  */
 typedef struct
 {
-    CK_MECHANISM_TYPE mech;         /* CKM_AES_CBC / _CBC_PAD / _GCM / _XTS */
+    CK_MECHANISM_TYPE mech;         /* CKM_AES_CBC / _CBC_PAD / _GCM / _XTS, CKM_RSA_PKCS_OAEP */
     uint32_t hsm_key;               /* unmasked device key handle; owned, freed with the op */
+    uint32_t hsm_other;             /* the other half of an unmasked RSA pair; owned, unused */
     CK_BYTE iv[AES_BLOCK_LEN];      /* CBC IV seed or XTS tweak (owned copy) */
     CK_BYTE gcm_iv[AES_GCM_IV_LEN]; /* GCM IV (owned copy) */
-    CK_BYTE *aad;                   /* GCM additional data (owned copy), NULL if none */
+    CK_BYTE *aad;                   /* GCM additional data or the OAEP label (owned copy) */
     CK_ULONG aad_len;
+    CK_MECHANISM_TYPE oaep_hash; /* OAEP: the OAEP and MGF1 hash */
+    CK_ULONG mod_len;            /* OAEP: the modulus length in bytes */
 
     /* Multi-part CBC: the SDK stream does the chaining, padding and block
      * buffering; the module keeps only what the PKCS#11 length rules and the
@@ -77,6 +82,7 @@ void tsra_pkcs11_cipher_op_free(void *op_ctx)
     /* The stream first: it references the device key. */
     tsra_pkcs11_key_aes_cbc_stream_free(op->cbc);
     tsra_pkcs11_key_release(op->hsm_key);
+    tsra_pkcs11_key_release(op->hsm_other);
     if (op->aad != NULL)
     {
         tsra_pkcs11_wipe(op->aad, op->aad_len);
@@ -527,15 +533,16 @@ typedef struct
 } cipher_check_ctx;
 
 /*
- * Whether the key may run the cipher mechanism in the direction asked: a
- * secret key of the mechanism's type with CKA_ENCRYPT or CKA_DECRYPT, and the
- * mechanism permitted by its CKA_ALLOWED_MECHANISMS. A missing or malformed
- * class, type or usage permits nothing. The store runs it on the record it
- * returns the body from, so a record rewritten in between cannot pass the
- * check with one version and supply the body from another. The class matters
- * as much: a clear record of another class could hold a sealed record's key
- * as its body, and encrypting with that key under a caller-chosen IV and AAD
- * would forge records.
+ * Whether the key may run the cipher mechanism in the direction asked: a key
+ * of the mechanism's type with CKA_ENCRYPT or CKA_DECRYPT, a secret key for
+ * AES and for RSA the public key to encrypt and the private key to decrypt,
+ * and the mechanism permitted by its CKA_ALLOWED_MECHANISMS. A missing or
+ * malformed class, type or usage permits nothing. The store runs it on the
+ * record it returns the body from, so a record rewritten in between cannot
+ * pass the check with one version and supply the body from another. The
+ * class matters as much: a clear record of another class could hold a sealed
+ * record's key as its body, and encrypting with that key under a
+ * caller-chosen IV and AAD would forge records.
  */
 static CK_RV check_cipher_key(void *cctx, tsra_pkcs11_objstore_reader read, void *rctx)
 {
@@ -569,9 +576,20 @@ static CK_RV check_cipher_key(void *cctx, tsra_pkcs11_objstore_reader read, void
     }
     /* C_EncryptInit has no return value for a key of the wrong class; the
      * one C_SignInit uses for it keeps the two consistent. */
-    if ((cls != CKO_SECRET_KEY) || !allowed)
+    CK_OBJECT_CLASS want = CKO_SECRET_KEY;
+    if (cc->cm->key_type == CKK_RSA)
+    {
+        want = cc->encrypt ? CKO_PUBLIC_KEY : CKO_PRIVATE_KEY;
+    }
+    if ((cls != want) || !allowed)
     {
         return CKR_KEY_FUNCTION_NOT_PERMITTED;
+    }
+    if ((cc->cm->key_type == CKK_RSA) && (rv == CKR_ATTRIBUTE_TYPE_INVALID))
+    {
+        /* No list on an RSA key: every mechanism of its type, as C_SignInit
+         * has it. The AES rule below is for keys from before lists. */
+        return CKR_OK;
     }
     /* A GCM key and a CBC key are both CKK_AES; the allowed-mechanism list
      * recorded at generation tells them apart, so a family mismatch is caught
@@ -613,6 +631,8 @@ static CK_RV cipher_init(
     const tsra_pkcs11_cipher_mech *cm = NULL;
     CK_GCM_PARAMS gcm;
     memset(&gcm, 0, sizeof(gcm));
+    tsra_pkcs11_oaep_params oaep;
+    memset(&oaep, 0, sizeof(oaep));
     if (s->op != P11_OP_NONE)
     {
         rv = CKR_OPERATION_ACTIVE;
@@ -628,6 +648,14 @@ static CK_RV cipher_init(
     else if (cm->mech == CKM_AES_XTS)
     {
         rv = tsra_pkcs11_xts_tweak_check(pMechanism->pParameter, pMechanism->ulParameterLen);
+    }
+    else if (cm->mech == CKM_RSA_PKCS_OAEP)
+    {
+        rv = tsra_pkcs11_oaep_params_check(
+            pMechanism->pParameter,
+            pMechanism->ulParameterLen,
+            &oaep
+        );
     }
     else if ((pMechanism->pParameter == NULL_PTR) || (pMechanism->ulParameterLen != AES_BLOCK_LEN))
     {
@@ -651,8 +679,8 @@ static CK_RV cipher_init(
     cipher_op *op = NULL;
     cipher_check_ctx cc = { cm, want == P11_OP_ENCRYPT };
 
-    /* Sizing only, so it runs unchecked and an object without a body stays a
-     * handle error; the check runs on the read that returns the body. */
+    /* Sizing only, so it runs unchecked; the check runs on the read that
+     * returns the body. */
     rv = g_tsra_pkcs11.store.ops->get_key_body(
         g_tsra_pkcs11.store.ctx,
         s->slot,
@@ -673,8 +701,21 @@ static CK_RV cipher_init(
     }
     if (body_len == 0)
     {
-        /* An object with no masked body (e.g. a data object) backs no key. */
-        rv = CKR_KEY_HANDLE_INVALID;
+        /* An object with no masked body (a data object, a public key made with
+         * C_CreateObject, the unwrapping key pair) backs no key. A key that
+         * lacks the usage is told so rather than about its handle; both reads
+         * end in a refusal, so no decision rests on two reads. */
+        CK_RV check = g_tsra_pkcs11.store.ops->get_key_body(
+            g_tsra_pkcs11.store.ctx,
+            s->slot,
+            CK_TRUE,
+            hKey,
+            NULL,
+            &body_len,
+            check_cipher_key,
+            &cc
+        );
+        rv = (check == CKR_KEY_FUNCTION_NOT_PERMITTED) ? check : CKR_KEY_HANDLE_INVALID;
         goto cleanup;
     }
 
@@ -715,26 +756,43 @@ static CK_RV cipher_init(
         goto cleanup;
     }
     op->mech = cm->mech;
+    /* The GCM AAD and the OAEP label are the caller's: both are copied. */
+    const CK_BYTE *extra = (cm->mech == CKM_AES_GCM) ? gcm.pAAD : oaep.label;
+    CK_ULONG extra_len = (cm->mech == CKM_AES_GCM) ? gcm.ulAADLen : oaep.label_len;
     if (cm->mech == CKM_AES_GCM)
     {
         memcpy(op->gcm_iv, gcm.pIv, AES_GCM_IV_LEN);
-        if (gcm.ulAADLen > 0)
-        {
-            op->aad = (CK_BYTE *)malloc(gcm.ulAADLen);
-            if (op->aad == NULL)
-            {
-                rv = CKR_HOST_MEMORY;
-                goto cleanup;
-            }
-            memcpy(op->aad, gcm.pAAD, gcm.ulAADLen);
-            op->aad_len = gcm.ulAADLen;
-        }
     }
-    else
+    else if (cm->mech != CKM_RSA_PKCS_OAEP)
     {
         memcpy(op->iv, pMechanism->pParameter, pMechanism->ulParameterLen);
     }
-    rv = tsra_pkcs11_key_aes_unmask(slot->hsm_session, cm->kind, body, body_len, &op->hsm_key);
+    if (extra_len > 0)
+    {
+        op->aad = (CK_BYTE *)malloc(extra_len);
+        if (op->aad == NULL)
+        {
+            rv = CKR_HOST_MEMORY;
+            goto cleanup;
+        }
+        memcpy(op->aad, extra, extra_len);
+        op->aad_len = extra_len;
+    }
+    if (cm->mech == CKM_RSA_PKCS_OAEP)
+    {
+        uint32_t priv = 0;
+        uint32_t pub = 0;
+        CK_ULONG bits = 0;
+        rv = tsra_pkcs11_key_rsa_unmask(slot->hsm_session, body, body_len, &priv, &pub, &bits);
+        op->hsm_key = (want == P11_OP_ENCRYPT) ? pub : priv;
+        op->hsm_other = (want == P11_OP_ENCRYPT) ? priv : pub;
+        op->oaep_hash = oaep.hash;
+        op->mod_len = bits / CHAR_BIT; /* the device's sizes are whole bytes */
+    }
+    else
+    {
+        rv = tsra_pkcs11_key_aes_unmask(slot->hsm_session, cm->kind, body, body_len, &op->hsm_key);
+    }
     if (rv != CKR_OK)
     {
         goto cleanup;
@@ -877,6 +935,105 @@ static CK_RV fixed_crypt(
 }
 
 /*
+ * The CKM_RSA_PKCS_OAEP half of cipher_oneshot, with *active as fixed_crypt
+ * sets it. A ciphertext is exactly one modulus long, and a message at most
+ * tsra_pkcs11_oaep_max_msg. A sizing probe needs no device call: it reports
+ * the modulus length to encrypt and the longest message to decrypt, which
+ * PKCS#11 lets it exceed the result by. A decrypt runs into a buffer of the
+ * module's own of exactly the modulus length, since the SDK writes the raw
+ * RSA block there before it removes the padding, and only a good result
+ * reaches the caller's buffer. The binding answers every failed decrypt with
+ * one code, so neither the code nor the caller's buffer tells one failure
+ * from another.
+ */
+static CK_RV oaep_crypt(
+    cipher_op *op,
+    bool encrypt,
+    const CK_BYTE *in,
+    CK_ULONG in_len,
+    CK_BYTE_PTR out,
+    CK_ULONG_PTR out_len,
+    bool *active
+)
+{
+    *active = false;
+    CK_ULONG max_msg = tsra_pkcs11_oaep_max_msg(op->mod_len, op->oaep_hash);
+    if (encrypt && (in_len > max_msg))
+    {
+        return CKR_DATA_LEN_RANGE;
+    }
+    if (!encrypt && (in_len != op->mod_len))
+    {
+        return CKR_ENCRYPTED_DATA_LEN_RANGE;
+    }
+    CK_ULONG need = encrypt ? op->mod_len : max_msg;
+    if (out == NULL_PTR)
+    {
+        *out_len = need; /* sizing probe: report, keep the operation */
+        *active = true;
+        return CKR_OK;
+    }
+    if (encrypt)
+    {
+        if (*out_len < need)
+        {
+            *out_len = need;
+            *active = true;
+            return CKR_BUFFER_TOO_SMALL;
+        }
+        CK_ULONG n = need; /* the SDK gets exactly the modulus length */
+        CK_RV rv = tsra_pkcs11_key_rsa_oaep(
+            true,
+            op->hsm_key,
+            op->oaep_hash,
+            op->aad,
+            op->aad_len,
+            in,
+            in_len,
+            out,
+            &n
+        );
+        *out_len = (rv == CKR_OK) ? n : 0;
+        return rv;
+    }
+    /* Every failure gives one code and an untouched buffer. The time still
+     * differs: the SDK removes the padding on the host and its check ends early
+     * on a nonzero first byte (crates/crypto rsa_pad_oaep.rs). The module cannot
+     * decode in its place, as the SDK offers no raw RSA decryption; the README
+     * lists this under Deviations. */
+    CK_BYTE *plain = (CK_BYTE *)malloc(op->mod_len);
+    if (plain == NULL)
+    {
+        return CKR_HOST_MEMORY;
+    }
+    CK_ULONG n = op->mod_len;
+    CK_RV rv = tsra_pkcs11_key_rsa_oaep(
+        false,
+        op->hsm_key,
+        op->oaep_hash,
+        op->aad,
+        op->aad_len,
+        in,
+        in_len,
+        plain,
+        &n
+    );
+    if ((rv == CKR_OK) && (*out_len < n))
+    {
+        rv = CKR_BUFFER_TOO_SMALL; /* the retry decrypts again */
+        *active = true;
+    }
+    else if (rv == CKR_OK)
+    {
+        memcpy(out, plain, n);
+    }
+    *out_len = ((rv == CKR_OK) || (rv == CKR_BUFFER_TOO_SMALL)) ? n : 0;
+    tsra_pkcs11_wipe(plain, op->mod_len);
+    free(plain);
+    return rv;
+}
+
+/*
  * Shared one-shot body. Follows the spec's operation-lifetime rules: a NULL
  * output buffer reports the required length and keeps the operation active, a
  * too-small buffer returns CKR_BUFFER_TOO_SMALL and keeps it active for the
@@ -927,11 +1084,13 @@ static CK_RV cipher_oneshot(
         tsra_pkcs11_unlock();
         return rv;
     }
-    if ((op->mech == CKM_AES_GCM) || (op->mech == CKM_AES_XTS))
+    if ((op->mech == CKM_AES_GCM) || (op->mech == CKM_AES_XTS) || (op->mech == CKM_RSA_PKCS_OAEP))
     {
         s->op_mode = P11_OP_MODE_ONESHOT;
         bool active = false;
-        rv = fixed_crypt(op, encrypt, in, in_len, out, out_len, &active);
+        rv = (op->mech == CKM_RSA_PKCS_OAEP)
+                 ? oaep_crypt(op, encrypt, in, in_len, out, out_len, &active)
+                 : fixed_crypt(op, encrypt, in, in_len, out, out_len, &active);
         if (!active)
         {
             tsra_pkcs11_session_reset_op(s);
@@ -1302,6 +1461,10 @@ static CK_RV cipher_update(
     {
         rv = CKR_OPERATION_ACTIVE; /* a one-shot call is in progress */
     }
+    else if (op->mech == CKM_RSA_PKCS_OAEP)
+    {
+        rv = CKR_FUNCTION_NOT_SUPPORTED; /* the SDK has no OAEP stream */
+    }
     else
     {
         s->op_mode = P11_OP_MODE_MULTIPART;
@@ -1352,6 +1515,10 @@ static CK_RV cipher_final(
     else if (s->op_mode == P11_OP_MODE_ONESHOT)
     {
         rv = CKR_OPERATION_ACTIVE; /* a one-shot call is in progress */
+    }
+    else if (op->mech == CKM_RSA_PKCS_OAEP)
+    {
+        rv = CKR_FUNCTION_NOT_SUPPORTED; /* the SDK has no OAEP stream */
     }
     else
     {

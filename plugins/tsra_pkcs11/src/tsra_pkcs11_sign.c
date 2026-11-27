@@ -12,11 +12,14 @@
  * it, and one operation does not mix one-shot and multi-part calls.
  */
 
+#include "tsra_pkcs11_digest.h"
 #include "tsra_pkcs11_ec_template.h"
 #include "tsra_pkcs11_internal.h"
 #include "tsra_pkcs11_key.h"
+#include "tsra_pkcs11_rsa_params.h"
 #include "tsra_pkcs11_template.h"
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -28,6 +31,8 @@ typedef struct
     uint32_t hsm_other; /* the other half of an unmasked pair; owned, unused */
     uint32_t stream;    /* SDK stream context once a multi-part call ran; 0 = none */
     CK_ULONG sig_len;   /* the signature length for this key and mechanism */
+    bool is_pss;        /* a PSS mechanism, whose parameters are `pss` */
+    CK_RSA_PKCS_PSS_PARAMS pss;
 } sign_op;
 
 void tsra_pkcs11_sign_op_free(void *op_ctx)
@@ -146,6 +151,20 @@ static CK_RV bind_key(
         op->sig_len = 2 * tsra_pkcs11_ec_coord_len(curve); /* r || s */
         return CKR_OK;
     }
+    case CKK_RSA: {
+        uint32_t priv = 0;
+        uint32_t pub = 0;
+        CK_ULONG bits = 0;
+        CK_RV rv = tsra_pkcs11_key_rsa_unmask(hsm_session, body, body_len, &priv, &pub, &bits);
+        if (rv != CKR_OK)
+        {
+            return rv;
+        }
+        op->hsm_key = sign ? priv : pub;
+        op->hsm_other = sign ? pub : priv;
+        op->sig_len = bits / CHAR_BIT; /* the device's sizes are whole bytes */
+        return CKR_OK;
+    }
     default:
         return CKR_KEY_TYPE_INCONSISTENT;
     }
@@ -179,6 +198,8 @@ static CK_RV sign_init(
      * operation state, mechanism and its parameter, then login state. */
     CK_RV rv = CKR_OK;
     const tsra_pkcs11_sign_mech *sm = NULL;
+    CK_RSA_PKCS_PSS_PARAMS pss;
+    bool is_pss = false;
     if (s->op != P11_OP_NONE)
     {
         rv = CKR_OPERATION_ACTIVE;
@@ -187,9 +208,9 @@ static CK_RV sign_init(
     {
         rv = CKR_MECHANISM_INVALID;
     }
-    else if ((pMechanism->pParameter != NULL_PTR) || (pMechanism->ulParameterLen != 0))
+    else
     {
-        rv = CKR_MECHANISM_PARAM_INVALID;
+        rv = tsra_pkcs11_sign_params_check(pMechanism, &pss, &is_pss);
     }
     if (rv != CKR_OK)
     {
@@ -224,9 +245,21 @@ static CK_RV sign_init(
     }
     if ((rv == CKR_OK) && (body_len == 0))
     {
-        /* An object with no masked body (a data object, or a public key made
-         * with C_CreateObject) backs no device key. */
-        rv = CKR_KEY_HANDLE_INVALID;
+        /* An object with no masked body (a data object, a public key made with
+         * C_CreateObject, the unwrapping key pair) backs no device key. A key
+         * that lacks the usage is told so rather than about its handle; both
+         * reads end in a refusal, so no decision rests on two reads. */
+        CK_RV check = g_tsra_pkcs11.store.ops->get_key_body(
+            g_tsra_pkcs11.store.ctx,
+            s->slot,
+            CK_TRUE,
+            hKey,
+            NULL,
+            &body_len,
+            check_key,
+            &kc
+        );
+        rv = (check == CKR_KEY_FUNCTION_NOT_PERMITTED) ? check : CKR_KEY_HANDLE_INVALID;
     }
     if (rv != CKR_OK)
     {
@@ -260,9 +293,18 @@ static CK_RV sign_init(
         goto cleanup;
     }
     op->sm = sm;
+    op->is_pss = is_pss;
+    op->pss = pss;
     rv = bind_key(op, slot->hsm_session, want == P11_OP_SIGN, body, body_len);
     if (rv != CKR_OK)
     {
+        goto cleanup;
+    }
+    /* The PSS salt is a parameter error, but only the key tells whether it
+     * fits (the mechanism checks above ran before the key was read). */
+    if (is_pss && !tsra_pkcs11_pss_salt_ok(op->sig_len * CHAR_BIT, &pss))
+    {
+        rv = CKR_MECHANISM_PARAM_INVALID;
         goto cleanup;
     }
     s->op_ctx = op;
@@ -332,15 +374,20 @@ static CK_RV op_done(tsra_pkcs11_session_t *s, bool keep, CK_RV rv)
 }
 
 /* The length verdict on the data of a one-shot call: the device buffers are
- * 32-bit, and CKM_ECDSA takes only the hash lengths the SDK recognises. */
+ * 32-bit, CKM_ECDSA takes only the hash lengths the SDK recognises, and
+ * CKM_RSA_PKCS_PSS exactly one hash of its parameters' hashAlg. */
 static CK_RV data_len_check(const sign_op *op, CK_ULONG len)
 {
-    if ((len > (CK_ULONG)UINT32_MAX) ||
-        ((op->sm->mech == CKM_ECDSA) && !tsra_pkcs11_ecdsa_raw_len_ok(len)))
-    {
-        return CKR_DATA_LEN_RANGE;
-    }
-    return CKR_OK;
+    bool raw_ecdsa = (op->sm->mech == CKM_ECDSA) && !tsra_pkcs11_ecdsa_raw_len_ok(len);
+    bool pre_hashed =
+        (op->sm->mech == CKM_RSA_PKCS_PSS) && (len != tsra_pkcs11_digest_mech_len(op->pss.hashAlg));
+    return ((len > (CK_ULONG)UINT32_MAX) || raw_ecdsa || pre_hashed) ? CKR_DATA_LEN_RANGE : CKR_OK;
+}
+
+/* The PSS parameters for the binding layer, NULL for a mechanism without them. */
+static const CK_RSA_PKCS_PSS_PARAMS *pss_of(const sign_op *op)
+{
+    return op->is_pss ? &op->pss : NULL;
 }
 
 /* Open the operation's SDK stream unless a multi-part call already did. */
@@ -350,7 +397,13 @@ static CK_RV stream_open(sign_op *op, bool sign)
     {
         return CKR_OK;
     }
-    return tsra_pkcs11_key_sign_stream_new(sign, op->sm->mech, op->hsm_key, &op->stream);
+    return tsra_pkcs11_key_sign_stream_new(
+        sign,
+        op->sm->mech,
+        pss_of(op),
+        op->hsm_key,
+        &op->stream
+    );
 }
 
 /*
@@ -413,7 +466,15 @@ CK_RV C_Sign(
         return op_done(s, true, rv);
     }
     CK_ULONG n = op->sig_len;
-    rv = tsra_pkcs11_key_sign(op->sm->mech, op->hsm_key, pData, ulDataLen, pSignature, &n);
+    rv = tsra_pkcs11_key_sign(
+        op->sm->mech,
+        pss_of(op),
+        op->hsm_key,
+        pData,
+        ulDataLen,
+        pSignature,
+        &n
+    );
     *pulSignatureLen = (rv == CKR_OK) ? n : 0;
     return op_done(s, false, rv);
 }
@@ -557,6 +618,7 @@ CK_RV C_Verify(
     {
         rv = tsra_pkcs11_key_verify(
             op->sm->mech,
+            pss_of(op),
             op->hsm_key,
             pData,
             ulDataLen,

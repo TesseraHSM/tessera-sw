@@ -50,7 +50,7 @@ BUCKETS=(des aes-ecb rsa-keygen hmac md5 so rng import sensitive unsupported sdk
 declare -A WHY=(
     [des]="DES or 3DES, which the SDK does not have: the cipher and dual-function fixtures' DES cases, and FindObjectSubset, which generates DES keys and RSA key pairs."
     [aes-ecb]="AES-ECB, out of scope for the module. The two IV cases pass without asserting anything: ECB takes no IV."
-    [rsa-keygen]="The fixture generates an RSA key pair. The module generates no general RSA keys (C_GenerateKeyPair hands out only the partition's unwrapping key pair): they arrive by unwrap, and the signature cases need an unwrap fixture."
+    [rsa-keygen]="RSA key pairs as the module does not make them. Its keys arrive by unwrap (rsa-fixture.patch), each signing or decrypting but not both, private on the token, in a logged-in session. So the CKM_RSA_PKCS and MD5 cases (neither offered; pkcs11test skips the signature ones), a key that signs with recovery and decrypts, a token pair with CKA_PRIVATE FALSE, C_GenerateKeyPair templates for other RSA keys and a test without a login stay off."
     [hmac]="HMAC keys from CKM_GENERIC_SECRET_KEY_GEN, which the SDK cannot generate. The module's HMAC keys come from ECDH plus HKDF, so these fixtures cannot pass."
     [md5]="MD5, which the module does not offer. pkcs11test skips these cases."
     [so]="The Security Officer. The device session has one user credential, so CKU_SO is refused and the token is presented initialised. pkcs11test skips the SO logins under -X and token initialisation without -I."
@@ -79,10 +79,15 @@ fail()
 MOD="$(cd "$(dirname "$MOD")" && pwd)/$(basename "$MOD")"
 SRC="$WORK/src"
 
+# The RSA key run.sh wrapped for the KeyPair fixture, absolute: the run
+# below starts inside the clone.
+BLOB="$(cd "$WORK" && pwd)/rsa-blob.bin"
+
 # The full run fails by design; its log is the input.
 (
     cd "$SRC" &&
-        ./pkcs11test -m "$(basename "$MOD")" -l "$(dirname "$MOD")" -s 0 -u "$PIN" -X
+        TSRA_PKCS11TEST_RSA_BLOB="$BLOB" \
+            ./pkcs11test -m "$(basename "$MOD")" -l "$(dirname "$MOD")" -s 0 -u "$PIN" -X
 ) > "$WORK/full.log" 2>&1 || true
 
 declare -A LISTED=() PASSED=() SKIPPED=() QUIET=()

@@ -321,16 +321,27 @@ TEST_F(ec_sign, init_precedence_and_usage)
     EXPECT_CKR(CKR_KEY_TYPE_INCONSISTENT, p11()->C_EncryptInit(s_, &cbc, priv_))
         << "an EC key does not encrypt";
 
-    // A public key made with C_CreateObject has no device key behind it.
+    // A public key made with C_CreateObject has no device key behind it,
+    // even with the curve and the point of a generated one; without
+    // CKA_VERIFY the missing usage is what the init reports.
     CK_OBJECT_CLASS cls = CKO_PUBLIC_KEY;
     CK_KEY_TYPE kt = CKK_EC;
+    CK_BBOOL verify = CK_TRUE;
     std::vector<CK_BYTE> params = ec_curves()[0].params;
+    std::vector<CK_BYTE> point;
+    ASSERT_CKR_OK(get_bytes(s_, pub_, CKA_EC_POINT, point));
     CK_ATTRIBUTE tmpl[] = { { CKA_CLASS, &cls, sizeof(cls) },
                             { CKA_KEY_TYPE, &kt, sizeof(kt) },
-                            { CKA_EC_PARAMS, params.data(), params.size() } };
+                            { CKA_EC_PARAMS, params.data(), params.size() },
+                            { CKA_EC_POINT, point.data(), point.size() },
+                            { CKA_VERIFY, &verify, sizeof(verify) } };
     CK_OBJECT_HANDLE created = 0;
-    ASSERT_CKR_OK(p11()->C_CreateObject(s_, tmpl, 3, &created));
-    EXPECT_CKR(CKR_KEY_HANDLE_INVALID, p11()->C_VerifyInit(s_, &m, created));
+    ASSERT_CKR_OK(p11()->C_CreateObject(s_, tmpl, 5, &created));
+    EXPECT_CKR(CKR_KEY_HANDLE_INVALID, p11()->C_VerifyInit(s_, &m, created))
+        << "no device key behind it";
+    ASSERT_CKR_OK(p11()->C_CreateObject(s_, tmpl, 4, &created));
+    EXPECT_CKR(CKR_KEY_FUNCTION_NOT_PERMITTED, p11()->C_VerifyInit(s_, &m, created))
+        << "the usage is judged before the device key";
 
     // The device fixed the pair's usage, so CKA_VERIFY stays as generated: a
     // public key generated without it does not verify.

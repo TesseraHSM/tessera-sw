@@ -5,14 +5,14 @@ Written by `offlist.sh` from an unfiltered pkcs11test run
 emulator module. Do not edit it by hand: change the bucket rules in
 `offlist.sh` and run it again.
 
-330 tests: 149 on the include-list, 181 off it (155 fail,
-26 pass without asserting anything).
+330 tests: 161 on the include-list, 169 off it (136 fail,
+33 pass without asserting anything).
 
 | Bucket | Names | Why they are off the list |
 |---|---|---|
 | des | 77 | DES or 3DES, which the SDK does not have: the cipher and dual-function fixtures' DES cases, and FindObjectSubset, which generates DES keys and RSA key pairs. |
 | aes-ecb | 18 | AES-ECB, out of scope for the module. The two IV cases pass without asserting anything: ECB takes no IV. |
-| rsa-keygen | 23 | The fixture generates an RSA key pair. The module generates no general RSA keys (C_GenerateKeyPair hands out only the partition's unwrapping key pair): they arrive by unwrap, and the signature cases need an unwrap fixture. |
+| rsa-keygen | 11 | RSA key pairs as the module does not make them. Its keys arrive by unwrap (rsa-fixture.patch), each signing or decrypting but not both, private on the token, in a logged-in session. So the CKM_RSA_PKCS and MD5 cases (neither offered; pkcs11test skips the signature ones), a key that signs with recovery and decrypts, a token pair with CKA_PRIVATE FALSE, C_GenerateKeyPair templates for other RSA keys and a test without a login stay off. |
 | hmac | 11 | HMAC keys from CKM_GENERIC_SECRET_KEY_GEN, which the SDK cannot generate. The module's HMAC keys come from ECDH plus HKDF, so these fixtures cannot pass. |
 | md5 | 12 | MD5, which the module does not offer. pkcs11test skips these cases. |
 | so | 10 | The Security Officer. The device session has one user credential, so CKU_SO is refused and the token is presented initialised. pkcs11test skips the SO logins under -X and token initialisation without -I. |
@@ -131,24 +131,12 @@ emulator module. Do not edit it by hand: change the bucket rules in
 - `ReadWriteSessionTest.AsymmetricTokenKeyPair`: fails
 - `ReadWriteSessionTest.ExtractKeys`: fails
 - `ReadWriteSessionTest.PublicExponent4Bytes`: fails
-- `Signatures/SignTest.SignFailVerifyShort/0`: fails
-- `Signatures/SignTest.SignFailVerifyShort/1`: fails
-- `Signatures/SignTest.SignFailVerifyShort/2`: fails
-- `Signatures/SignTest.SignFailVerifyShort/3`: fails
-- `Signatures/SignTest.SignFailVerifyShort/4`: fails
-- `Signatures/SignTest.SignFailVerifyShort/5`: fails
-- `Signatures/SignTest.SignFailVerifyWrong/0`: fails
-- `Signatures/SignTest.SignFailVerifyWrong/1`: fails
-- `Signatures/SignTest.SignFailVerifyWrong/2`: fails
-- `Signatures/SignTest.SignFailVerifyWrong/3`: fails
-- `Signatures/SignTest.SignFailVerifyWrong/4`: fails
-- `Signatures/SignTest.SignFailVerifyWrong/5`: fails
-- `Signatures/SignTest.SignVerify/0`: fails
-- `Signatures/SignTest.SignVerify/1`: fails
-- `Signatures/SignTest.SignVerify/2`: fails
-- `Signatures/SignTest.SignVerify/3`: fails
-- `Signatures/SignTest.SignVerify/4`: fails
-- `Signatures/SignTest.SignVerify/5`: fails
+- `Signatures/SignTest.SignFailVerifyShort/0`: skipped by pkcs11test
+- `Signatures/SignTest.SignFailVerifyShort/1`: skipped by pkcs11test
+- `Signatures/SignTest.SignFailVerifyWrong/0`: skipped by pkcs11test
+- `Signatures/SignTest.SignFailVerifyWrong/1`: skipped by pkcs11test
+- `Signatures/SignTest.SignVerify/0`: skipped by pkcs11test
+- `Signatures/SignTest.SignVerify/1`: skipped by pkcs11test
 
 ## hmac
 
@@ -225,7 +213,7 @@ emulator module. Do not edit it by hand: change the bucket rules in
 - `ROUserSessionTest.UnwrapInvalid`: fails
 - `ROUserSessionTest.WrapInvalid`: fails
 - `ROUserSessionTest.WrapUnwrap`: fails
-- `RWEitherSessionTest.TookanAttackA2`: fails
+- `RWEitherSessionTest.TookanAttackA2`: skipped by pkcs11test
 - `ReadWriteSessionTest.CreateCopyDestroyObject`: fails
 - `ReadWriteSessionTest.GetSetOperationState`: skipped by pkcs11test
 - `ReadWriteSessionTest.GetSetOperationStateInvalid`: skipped by pkcs11test

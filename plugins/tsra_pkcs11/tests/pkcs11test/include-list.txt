@@ -163,4 +163,16 @@ RWUserSessionTest.LogoutInvalid
 RWUserSessionTest.SetLatchingAttribute
 RWUserSessionTest.TookanAttackA3
 RWUserSessionTest.TookanAttackA5a
+Signatures/SignTest.SignFailVerifyShort/2
+Signatures/SignTest.SignFailVerifyShort/3
+Signatures/SignTest.SignFailVerifyShort/4
+Signatures/SignTest.SignFailVerifyShort/5
+Signatures/SignTest.SignFailVerifyWrong/2
+Signatures/SignTest.SignFailVerifyWrong/3
+Signatures/SignTest.SignFailVerifyWrong/4
+Signatures/SignTest.SignFailVerifyWrong/5
+Signatures/SignTest.SignVerify/2
+Signatures/SignTest.SignVerify/3
+Signatures/SignTest.SignVerify/4
+Signatures/SignTest.SignVerify/5
 Slot.NoInit

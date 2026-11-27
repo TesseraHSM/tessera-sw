@@ -1,0 +1,98 @@
+From google/pkcs11test (https://github.com/google/pkcs11test), Apache-2.0,
+at the revision pinned in run.sh, applied after aes-fixture.patch. The token
+generates no RSA keys, so pkcs11test's KeyPair fixture unwraps the RSA-2048
+key run.sh wrapped for the token's unwrapping key (TSRA_PKCS11TEST_RSA_BLOB,
+from rsa_blob.c) with CKM_RSA_AES_KEY_WRAP, and takes the public key the
+unwrap leaves, found by a CKA_ID of the pair's own, instead of generating an
+RSA-1024 pair. The headers pkcs11test vendors predate CKM_RSA_AES_KEY_WRAP,
+hence its value and parameter layout inline. The context lines below are
+upstream's. See README.md.
+
+diff --git a/pkcs11test.h b/pkcs11test.h
+--- a/pkcs11test.h
++++ b/pkcs11test.h
+@@ -30,6 +30,8 @@
+ #include <memory>
+ #include <vector>
+ #include <cstdlib>
++#include <cstdio>
++#include <string>
+ 
+ namespace pkcs11 {
+ 
+@@ -275,22 +277,52 @@
+     : session_(session),
+       public_attrs_(public_attrs), private_attrs_(private_attrs),
+       public_key_(INVALID_OBJECT_HANDLE), private_key_(INVALID_OBJECT_HANDLE) {
+-    CK_ULONG modulus_bits = 1024;
+-    CK_ATTRIBUTE modulus = {CKA_MODULUS_BITS, &modulus_bits, sizeof(modulus_bits)};
+-    public_attrs_.push_back(modulus);
+-    CK_BYTE public_exponent_value[] = {0x1, 0x0, 0x1}; // 65537=0x010001
+-    CK_ATTRIBUTE public_exponent = {CKA_PUBLIC_EXPONENT, public_exponent_value, sizeof(public_exponent_value)};
+-    public_attrs_.push_back(public_exponent);
+-
++    // The token generates no RSA keys: unwrap the RSA-2048 key run.sh wrapped
++    // for the token's unwrapping key, and take the public key the unwrap
++    // leaves, found by a CKA_ID of this pair's own.
++    std::vector<CK_BYTE> blob;
++    const char* path = std::getenv("TSRA_PKCS11TEST_RSA_BLOB");
++    FILE* f = (path != nullptr) ? fopen(path, "rb") : nullptr;
++    EXPECT_NE(nullptr, f) << "TSRA_PKCS11TEST_RSA_BLOB names no readable file";
++    if (f == nullptr) return;
++    for (int c = fgetc(f); c != EOF; c = fgetc(f)) blob.push_back((CK_BYTE)c);
++    fclose(f);
++    static unsigned long serial = 0;
++    id_ = "pkcs11test-keypair-" + std::to_string(++serial);
++    CK_ATTRIBUTE id = {CKA_ID, (CK_VOID_PTR)id_.data(), id_.size()};
++    CK_ATTRIBUTE cls = {CKA_CLASS, &private_class_, sizeof(private_class_)};
++    CK_ATTRIBUTE type = {CKA_KEY_TYPE, &rsa_, sizeof(rsa_)};
+     CK_ATTRIBUTE public_object = {CKA_PRIVATE, (CK_VOID_PTR)&g_ck_false, sizeof(CK_BBOOL)};
+-    public_attrs_.push_back(public_object);
++    private_attrs_.push_back(cls);
++    private_attrs_.push_back(type);
++    private_attrs_.push_back(id);
+     private_attrs_.push_back(public_object);
+ 
+-    CK_MECHANISM mechanism = {CKM_RSA_PKCS_KEY_PAIR_GEN, NULL_PTR, 0};
+-    EXPECT_CKR_OK(g_fns->C_GenerateKeyPair(session_, &mechanism,
+-                                           public_attrs_.data(), public_attrs_.size(),
+-                                           private_attrs_.data(), private_attrs_.size(),
+-                                           &public_key_, &private_key_));
++    CK_ULONG bits = 2048;
++    CK_ATTRIBUTE wrap_pub[] = {{CKA_MODULUS_BITS, &bits, sizeof(bits)},
++                               {CKA_WRAP, (CK_VOID_PTR)&g_ck_true, sizeof(CK_BBOOL)}};
++    CK_ATTRIBUTE wrap_priv[] = {{CKA_UNWRAP, (CK_VOID_PTR)&g_ck_true, sizeof(CK_BBOOL)}};
++    CK_OBJECT_HANDLE unwrapping_pub = INVALID_OBJECT_HANDLE;
++    CK_OBJECT_HANDLE unwrapping = INVALID_OBJECT_HANDLE;
++    CK_MECHANISM gen = {CKM_RSA_PKCS_KEY_PAIR_GEN, NULL_PTR, 0};
++    EXPECT_CKR_OK(g_fns->C_GenerateKeyPair(session_, &gen, wrap_pub, 2, wrap_priv, 1,
++                                           &unwrapping_pub, &unwrapping));
++    CK_RSA_PKCS_OAEP_PARAMS oaep = {CKM_SHA256, CKG_MGF1_SHA256, CKZ_DATA_SPECIFIED, NULL_PTR, 0};
++    struct { CK_ULONG ulAESKeyBits; CK_RSA_PKCS_OAEP_PARAMS_PTR pOAEPParams; } wrap = {256, &oaep};
++    CK_MECHANISM unwrap = {0x00001054UL /* CKM_RSA_AES_KEY_WRAP */, &wrap, sizeof(wrap)};
++    EXPECT_CKR_OK(g_fns->C_UnwrapKey(session_, &unwrap, unwrapping, blob.data(), blob.size(),
++                                     private_attrs_.data(), private_attrs_.size(),
++                                     &private_key_));
++    EXPECT_CKR_OK(g_fns->C_DestroyObject(session_, unwrapping_pub));
++    EXPECT_CKR_OK(g_fns->C_DestroyObject(session_, unwrapping));
++
++    CK_OBJECT_CLASS public_class = CKO_PUBLIC_KEY;
++    CK_ATTRIBUTE find[] = {{CKA_CLASS, &public_class, sizeof(public_class)}, id};
++    CK_ULONG found = 0;
++    EXPECT_CKR_OK(g_fns->C_FindObjectsInit(session_, find, 2));
++    EXPECT_CKR_OK(g_fns->C_FindObjects(session_, &public_key_, 1, &found));
++    EXPECT_CKR_OK(g_fns->C_FindObjectsFinal(session_));
++    EXPECT_EQ(1u, found) << "the unwrap leaves the public key";
+   }
+   ~KeyPair() {
+     if (public_key_ != INVALID_OBJECT_HANDLE) {
+@@ -310,6 +342,9 @@
+   ObjectAttributes private_attrs_;
+   CK_OBJECT_HANDLE public_key_;
+   CK_OBJECT_HANDLE private_key_;
++  std::string id_;
++  CK_OBJECT_CLASS private_class_ = CKO_PRIVATE_KEY;
++  CK_KEY_TYPE rsa_ = CKK_RSA;
+ };
+ 
+ // Test fixture for tests involving a secret key.

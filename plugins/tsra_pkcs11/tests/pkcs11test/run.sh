@@ -3,7 +3,8 @@
 # Licensed under the MIT License.
 #
 # Conformance gate: builds Google pkcs11test at a pinned revision (with the
-# login-profile and AES fixture patches), runs it against the given module and
+# login-profile, AES and RSA fixture patches), wraps the RSA key the RSA
+# fixture unwraps (rsa_blob.c), runs the tool against the given module and
 # requires every test named in include-list.txt to pass and to have actually
 # run, once on the memory object store and once on a file store seeded with
 # objects (seed_store.c). See README.md alongside.
@@ -27,8 +28,8 @@ PIN="${TSRA_PKCS11_TEST_PIN:-1234}"
 INCLUDE="$HERE/include-list.txt"
 # The include-list only grows: fewer names than this fails the gate. Raise the
 # floor when names are added; lowering it is a deliberate edit with a reason.
-FLOOR=149
-PATCHES=("$HERE/hsm-profile-login.patch" "$HERE/aes-fixture.patch")
+FLOOR=161
+PATCHES=("$HERE/hsm-profile-login.patch" "$HERE/aes-fixture.patch" "$HERE/rsa-fixture.patch")
 SRC="$WORK/src"
 
 fail()
@@ -76,7 +77,15 @@ CXXFLAGS="${CXXFLAGS:-} -include cstdint" \
 make -C "$SRC" -s -j"$(nproc 2>/dev/null || echo 2)" > "$WORK/build.log" 2>&1 ||
     { tail -n 30 "$WORK/build.log"; fail "build failed (see $WORK/build.log)"; }
 
-# --- 4. Run exactly the include-list, twice ---------------------------------
+# --- 4. The RSA key the KeyPair fixture unwraps ------------------------------
+# One blob serves both runs: the partition's unwrapping key outlives processes.
+gcc -Wall -Wextra -Werror -I"$PLUGIN/include/pkcs11-v3.1" -I"$PLUGIN/src" \
+    "$HERE/rsa_blob.c" -o "$WORK/rsa_blob" -ldl -lcrypto || fail "cannot build the RSA key wrapper"
+BLOB="$(cd "$WORK" && pwd)/rsa-blob.bin" # absolute: the gate runs from inside the clone
+TSRA_PKCS11_PERSIST=0 "$WORK/rsa_blob" "$MOD" "$PIN" "$BLOB" ||
+    fail "cannot wrap the RSA key for the token's unwrapping key"
+
+# --- 5. Run exactly the include-list, twice ---------------------------------
 FILTER="$(IFS=:; echo "${NAMES[*]}")"
 
 # run_gate <label> <log> [env arguments...]: run the listed tests under
@@ -132,7 +141,7 @@ run_gate()
 
 echo "pkcs11test gate: ${#NAMES[@]} listed tests against $MOD"
 # Set, not unset: a persist = 1 in TSRA_PKCS11_CONF would otherwise apply.
-run_gate "memory store" "$WORK/run.log" TSRA_PKCS11_PERSIST=0
+run_gate "memory store" "$WORK/run.log" TSRA_PKCS11_PERSIST=0 TSRA_PKCS11TEST_RSA_BLOB="$BLOB"
 
 # Every process starts with an empty memory store, so the object searches and
 # listings above met nothing older than the test itself. The second run meets a
@@ -145,6 +154,6 @@ TSRA_PKCS11_PERSIST=1 TSRA_PKCS11_STORE_DIR="$STORE" "$WORK/seed_store" "$MOD" "
     fail "cannot seed the file store $STORE"
 echo "pkcs11test gate: the same tests on a populated file store"
 run_gate "populated file store" "$WORK/run-persist.log" \
-    TSRA_PKCS11_PERSIST=1 TSRA_PKCS11_STORE_DIR="$STORE"
+    TSRA_PKCS11_PERSIST=1 TSRA_PKCS11_STORE_DIR="$STORE" TSRA_PKCS11TEST_RSA_BLOB="$BLOB"
 
 echo "pkcs11test gate: all ${#NAMES[@]} listed tests passed on both stores"

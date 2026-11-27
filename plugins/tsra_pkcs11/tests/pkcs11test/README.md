@@ -14,9 +14,10 @@ requests into the staging branch.
 
 1. clones pkcs11test at the pinned revision (`PKCS11TEST_REV` in the script)
    into the work directory, or reuses a previous clone there,
-2. resets that checkout, applies the two fixture patches (below) and builds
+2. resets that checkout, applies the three fixture patches (below) and builds
    the tool from clean — its makefile has no header dependencies, so an
-   incremental build after a header change is silently stale,
+   incremental build after a header change is silently stale, and wraps an
+   RSA-2048 key for the token (`rsa_blob.c`) for the RSA fixture,
 3. runs it against the module with `-s 0 -u <pin> -X` and
    `--gtest_filter=<every name in include-list.txt>`,
 4. fails unless **every listed test passed, ran, and actually asserted
@@ -103,24 +104,42 @@ a mechanism. The patch makes the default an AES-256 key (`CKM_AES_KEY_GEN`,
 latch and Tookan tests built on the helper test this token's keys. Callers
 that name a mechanism, such as the DES cipher cases, are unchanged.
 
-## What the gate covers today (149 of 330)
+### RSA key pairs (`rsa-fixture.patch`)
+
+pkcs11test's `KeyPair` helper generates an RSA-1024 pair with
+`C_GenerateKeyPair`. The token generates no RSA keys: they arrive by
+`C_UnwrapKey`, which also leaves the public key. The patch makes the helper
+unwrap an RSA-2048 key with `CKM_RSA_AES_KEY_WRAP` from the blob
+`TSRA_PKCS11TEST_RSA_BLOB` names, and find the public key by a `CKA_ID` of the
+pair's own. `run.sh` writes that blob before the runs with `rsa_blob.c`: a
+fresh RSA-2048 key as PKCS#8, wrapped for the partition's unwrapping key,
+which it reads through the module. That key is the same in every process
+until the device is provisioned afresh, so one blob serves both runs. The
+signature tests then run unchanged on a token key. pkcs11test's vendored
+headers predate `CKM_RSA_AES_KEY_WRAP`, so the patch spells its value and
+parameter layout out.
+
+## What the gate covers today (161 of 330)
 
 Digests (SHA-1/256/384/512, one-shot and multi-part, sizing, the operation
 state machine), the library/slot/session/login surface, public data objects
 (including the `C_SetAttributeValue` argument and read-only checks and the
 `C_CreateObject` template checks), the key-attribute latches and the readback
 refusal of a sensitive key (`SetLatchingAttribute`, `TookanAttackA3`,
-`TookanAttackA5a`), BER decoding, the AES-CBC cipher tests (one-shot round trip, sizing, wrong key,
+`TookanAttackA5a`), BER decoding, the RSA signature tests of SHA-1, SHA-256,
+SHA-384 and SHA-512 with PKCS#1 v1.5 (sign and verify, a corrupted and a short
+signature) on an unwrapped key, the AES-CBC cipher tests (one-shot round trip, sizing, wrong key,
 IV validation, argument errors; multi-part argument errors, the final-call
 length rules and the one-shot/multi-part mode rule) and the operation-lifetime
 rules on the cipher and digest entry points, the argument checks of
 `C_GenerateKeyPair`, and the answers of the random-number functions on a
 token without a generator (`CKR_RANDOM_NO_RNG`).
 
-A full run reports 175 passing, but 26 of those are deliberately **not** on
-the list, because they assert nothing: 23 that pkcs11test skips (the MD5
+A full run reports 194 passing, but 33 of those are deliberately **not** on
+the list, because they assert nothing: 30 that pkcs11test skips (the MD5
 digest parameter, token initialisation, the SO logins suppressed by `-X`,
-`C_GetOperationState`, the dual-function digest+encrypt), the two AES-ECB IV
+`C_GetOperationState`, the dual-function digest+encrypt, the signature cases
+of `CKM_RSA_PKCS` and MD5, `C_WrapKey`), the two AES-ECB IV
 cases, whose bodies return immediately for a mechanism that has no IV, and
 `GenerateRandomNone`, which has nothing to check without a generator. They
 come onto the list when the feature behind them lands.
@@ -130,15 +149,17 @@ of every one-block `C_EncryptUpdate`, while the SDK's CBC stream holds back the
 last full block until the final call (the spec allows that; the case joins the
 list once the SDK releases unpadded blocks at once), mechanisms this module
 does not implement
-(DES/3DES/AES-ECB, RSA, HMAC, wrap/unwrap; pkcs11test 2cbe462 has no EC cases),
+(DES/3DES/AES-ECB, `CKM_RSA_PKCS`, MD5, HMAC, wrap/unwrap; pkcs11test 2cbe462
+has no EC cases), RSA key pairs as the token does not make them (generated,
+or signing and decrypting at once),
 entry points that are stubs (`C_CopyObject`, `C_DigestKey`), key import
 through `C_CreateObject` with `CKA_VALUE`, which the token refuses, keys that
 are not sensitive (`TookanAttackA4` and `A5b` ask for one, and the device holds
 keys only masked), and a few tests
 whose expectations assume a soft token or predate v3.0. For example
 `EncryptDecryptInitInvalid` wants `CKR_KEY_TYPE_INCONSISTENT` for
-`CKM_RSA_PKCS` on an AES key, where this token, which does not offer RSA,
-answers `CKR_MECHANISM_INVALID`, and an error for a NULL mechanism, which
+`CKM_RSA_PKCS` on an AES key, where this token, which does not offer
+`CKM_RSA_PKCS`, answers `CKR_MECHANISM_INVALID`, and an error for a NULL mechanism, which
 v3.0 made the way to end an operation.
 
 A wrong PIN can be checked on the emulator: the first login in a process

@@ -12,6 +12,7 @@
 #include "tsra_pkcs11_internal.h"
 #include "tsra_pkcs11_status.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -231,12 +232,16 @@ CK_RV tsra_pkcs11_key_aes_generate(
     return rv;
 }
 
-/* The SDK's ids for an OAEP hash tsra_pkcs11_unwrap_params_check accepted;
- * false for any other. */
-static bool oaep_hash_ids(CK_MECHANISM_TYPE hash, uint32_t *out_hash, uint32_t *out_mgf1)
+/* The SDK's hash and MGF1 ids of a hash a parameter check accepted (SHA-1
+ * only for PSS: the SDK's OAEP refuses it); false for any other. */
+static bool hash_ids(CK_MECHANISM_TYPE hash, uint32_t *out_hash, uint32_t *out_mgf1)
 {
     switch (hash)
     {
+    case CKM_SHA_1:
+        *out_hash = TSRA_ALGO_ID_SHA1;
+        *out_mgf1 = TSRA_MGF1_ID_SHA1;
+        return true;
     case CKM_SHA256:
         *out_hash = TSRA_ALGO_ID_SHA256;
         *out_mgf1 = TSRA_MGF1_ID_SHA256;
@@ -335,7 +340,8 @@ CK_RV tsra_pkcs11_key_aes_unwrap(
     if ((out_blob == NULL) || (out_blob_len == NULL) || (wrapped == NULL) || (wrapped_len == 0) ||
         (wrapped_len > (CK_ULONG)UINT32_MAX) || (aes_key_bits > (CK_ULONG)UINT32_MAX) ||
         ((scope != TSRA_PKCS11_SCOPE_PARTITION) && (scope != TSRA_PKCS11_SCOPE_SESSION)) ||
-        !device_kind(kind, &dev_kind, &keygen_algo) || !oaep_hash_ids(oaep_hash, &hash, &mgf1))
+        !device_kind(kind, &dev_kind, &keygen_algo) || (oaep_hash == CKM_SHA_1) ||
+        !hash_ids(oaep_hash, &hash, &mgf1))
     {
         return CKR_ARGUMENTS_BAD;
     }
@@ -361,6 +367,137 @@ CK_RV tsra_pkcs11_key_aes_unwrap(
     }
     CK_RV rv = get_prop_alloc(key, TSRA_KEY_PROP_ID_MASKED_KEY, out_blob, out_blob_len);
     (void)tsra_key_delete(key);
+    return rv;
+}
+
+/* Every masked scope a key call takes; anything else is a caller error. */
+static bool scope_ok(tsra_pkcs11_key_scope_t scope)
+{
+    return (scope == TSRA_PKCS11_SCOPE_PARTITION) || (scope == TSRA_PKCS11_SCOPE_SESSION);
+}
+
+/* The SDK's flag of a usage attribute, for the private key and for its public
+ * counterpart; false for a usage no key pair of `key_type` has. */
+static bool pair_usage(CK_KEY_TYPE key_type, CK_ATTRIBUTE_TYPE usage, uint32_t *priv, uint32_t *pub)
+{
+    if (usage == CKA_SIGN)
+    {
+        *priv = TSRA_KEY_PROP_ID_SIGN;
+        *pub = TSRA_KEY_PROP_ID_VERIFY;
+        return true;
+    }
+    if ((key_type == CKK_RSA) && (usage == CKA_DECRYPT))
+    {
+        *priv = TSRA_KEY_PROP_ID_DECRYPT;
+        *pub = TSRA_KEY_PROP_ID_ENCRYPT;
+        return true;
+    }
+    if ((key_type == CKK_EC) && (usage == CKA_DERIVE))
+    {
+        *priv = TSRA_KEY_PROP_ID_DERIVE;
+        *pub = TSRA_KEY_PROP_ID_DERIVE;
+        return true;
+    }
+    return false;
+}
+
+CK_RV tsra_pkcs11_key_pair_unwrap(
+    uint32_t unwrapping_key,
+    CK_MECHANISM_TYPE oaep_hash,
+    CK_ULONG aes_key_bits,
+    CK_KEY_TYPE key_type,
+    CK_ULONG rsa_bits,
+    tsra_pkcs11_ec_curve_t curve,
+    CK_ATTRIBUTE_TYPE usage,
+    tsra_pkcs11_key_scope_t scope,
+    const CK_BYTE *wrapped,
+    CK_ULONG wrapped_len,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len,
+    CK_BYTE **out_spki,
+    CK_ULONG *out_spki_len
+)
+{
+    uint32_t hash = 0;
+    uint32_t mgf1 = 0;
+    uint32_t priv_use = 0;
+    uint32_t pub_use = 0;
+    bool rsa = (key_type == CKK_RSA);
+    if ((out_blob == NULL) || (out_blob_len == NULL) || (out_spki == NULL) ||
+        (out_spki_len == NULL) || (wrapped == NULL) || (wrapped_len == 0) ||
+        (wrapped_len > (CK_ULONG)UINT32_MAX) || (aes_key_bits > (CK_ULONG)UINT32_MAX) ||
+        (rsa_bits > (CK_ULONG)UINT32_MAX) || !scope_ok(scope) || (oaep_hash == CKM_SHA_1) ||
+        !hash_ids(oaep_hash, &hash, &mgf1) || !pair_usage(key_type, usage, &priv_use, &pub_use) ||
+        ((key_type != CKK_RSA) && (key_type != CKK_EC)) ||
+        (!rsa && (tsra_pkcs11_ec_coord_len(curve) == 0)))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    *out_blob = NULL;
+    *out_blob_len = 0;
+    *out_spki = NULL;
+    *out_spki_len = 0;
+
+    /* The size or curve goes into both halves, which the SDK checks against
+     * what the device unwraps (api/lib op/key_props.rs validate_dev_props).
+     * An RSA private key is the CRT kind, as the OpenSSL provider imports it;
+     * its public half is a plain RSA key. */
+    uint32_t class_priv = TSRA_KEY_CLASS_PRIVATE;
+    uint32_t class_pub = TSRA_KEY_CLASS_PUBLIC;
+    uint32_t kind_priv = rsa ? TSRA_KEY_KIND_RSA_CRT : TSRA_KEY_KIND_ECC;
+    uint32_t kind_pub = rsa ? TSRA_KEY_KIND_RSA : TSRA_KEY_KIND_ECC;
+    uint32_t size_id = rsa ? TSRA_KEY_PROP_ID_BIT_LEN : TSRA_KEY_PROP_ID_EC_CURVE;
+    uint32_t size = rsa ? (uint32_t)rsa_bits : (uint32_t)curve;
+    uint8_t yes = 1;
+    uint8_t session = (scope == TSRA_PKCS11_SCOPE_SESSION) ? 1 : 0;
+    struct tsra_key_prop priv_props[] = {
+        { TSRA_KEY_PROP_ID_CLASS, &class_priv, sizeof(class_priv) },
+        { TSRA_KEY_PROP_ID_KIND, &kind_priv, sizeof(kind_priv) },
+        { size_id, &size, sizeof(size) },
+        { TSRA_KEY_PROP_ID_SESSION, &session, sizeof(session) },
+        { priv_use, &yes, sizeof(yes) },
+    };
+    struct tsra_key_prop pub_props[] = {
+        { TSRA_KEY_PROP_ID_CLASS, &class_pub, sizeof(class_pub) },
+        { TSRA_KEY_PROP_ID_KIND, &kind_pub, sizeof(kind_pub) },
+        { size_id, &size, sizeof(size) },
+        { TSRA_KEY_PROP_ID_SESSION, &session, sizeof(session) },
+        { pub_use, &yes, sizeof(yes) },
+    };
+    struct tsra_key_prop_list priv_list = { priv_props,
+                                            sizeof(priv_props) / sizeof(priv_props[0]) };
+    struct tsra_key_prop_list pub_list = { pub_props, sizeof(pub_props) / sizeof(pub_props[0]) };
+    /* No OAEP label: the SDK's unwrap does not pass one to the device. */
+    struct tsra_algo_rsa_pkcs_oaep_params oaep = { hash, mgf1, NULL };
+    struct tsra_algo_rsa_aes_key_wrap_params params = { (uint32_t)aes_key_bits, &oaep };
+    struct tsra_algo algo = { TSRA_ALGO_ID_RSA_AES_KEY_WRAP, &params, sizeof(params) };
+    struct tsra_buffer blob = { (void *)wrapped, (uint32_t)wrapped_len };
+
+    tsra_handle priv = 0;
+    tsra_handle pub = 0;
+    tsra_status st =
+        tsra_key_unwrap_pair(&algo, unwrapping_key, &blob, &priv_list, &pub_list, &priv, &pub);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("key_unwrap_pair(kind %u, size %u) failed: %d", kind_priv, size, (int)st);
+        /* One code for every status, as in tsra_pkcs11_key_aes_unwrap: no
+         * decryption oracle. */
+        return CKR_WRAPPED_KEY_INVALID;
+    }
+    CK_RV rv = get_prop_alloc(priv, TSRA_KEY_PROP_ID_MASKED_KEY, out_blob, out_blob_len);
+    if (rv == CKR_OK)
+    {
+        rv = get_prop_alloc(pub, TSRA_KEY_PROP_ID_PUB_KEY_INFO, out_spki, out_spki_len);
+    }
+    if ((rv != CKR_OK) && (*out_blob != NULL))
+    {
+        tsra_pkcs11_wipe(*out_blob, *out_blob_len);
+        free(*out_blob);
+        *out_blob = NULL;
+        *out_blob_len = 0;
+    }
+    (void)tsra_key_delete(priv);
+    (void)tsra_key_delete(pub);
     return rv;
 }
 
@@ -901,6 +1038,48 @@ CK_RV tsra_pkcs11_key_ec_unmask(
     return CKR_OK;
 }
 
+CK_RV tsra_pkcs11_key_rsa_unmask(
+    uint32_t hsm_session,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    uint32_t *out_priv,
+    uint32_t *out_pub,
+    CK_ULONG *out_bits
+)
+{
+    if ((blob == NULL) || (blob_len == 0) || (blob_len > (CK_ULONG)UINT32_MAX) ||
+        (out_priv == NULL) || (out_pub == NULL) || (out_bits == NULL))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    struct tsra_buffer masked = { (void *)blob, (uint32_t)blob_len };
+    tsra_handle priv = 0;
+    tsra_handle pub = 0;
+    /* The SDK unmasks an RSA and an RSA-CRT pair alike; the blob says which. */
+    tsra_status st = tsra_key_unmask_pair(hsm_session, TSRA_KEY_KIND_RSA, &masked, &priv, &pub);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("key_unmask_pair(RSA) failed: %d", (int)st);
+        /* As for AES: the only handle passed is the device session. */
+        return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_USER_NOT_LOGGED_IN);
+    }
+    uint32_t bits = 0;
+    struct tsra_key_prop prop = { TSRA_KEY_PROP_ID_BIT_LEN, &bits, sizeof(bits) };
+    st = tsra_key_get_prop(pub, &prop);
+    if ((st != TSRA_STATUS_SUCCESS) || (bits < RSA_MIN_KEY_BITS) || (bits > RSA_MAX_KEY_BITS) ||
+        ((bits % CHAR_BIT) != 0))
+    {
+        TSRA_PKCS11_LOG("RSA size readback failed: %d (%u bits)", (int)st, bits);
+        (void)tsra_key_delete(priv);
+        (void)tsra_key_delete(pub);
+        return CKR_KEY_HANDLE_INVALID;
+    }
+    *out_priv = priv;
+    *out_pub = pub;
+    *out_bits = bits;
+    return CKR_OK;
+}
+
 /* The SDK algorithm of a sign mechanism; false for any other mechanism. */
 static bool sign_algo(CK_MECHANISM_TYPE mech, uint32_t *out)
 {
@@ -921,13 +1100,77 @@ static bool sign_algo(CK_MECHANISM_TYPE mech, uint32_t *out)
     case CKM_ECDSA_SHA512:
         *out = TSRA_ALGO_ID_ECDSA_SHA512;
         return true;
+    case CKM_SHA1_RSA_PKCS:
+        *out = TSRA_ALGO_ID_RSA_PKCS_SHA1;
+        return true;
+    case CKM_SHA256_RSA_PKCS:
+        *out = TSRA_ALGO_ID_RSA_PKCS_SHA256;
+        return true;
+    case CKM_SHA384_RSA_PKCS:
+        *out = TSRA_ALGO_ID_RSA_PKCS_SHA384;
+        return true;
+    case CKM_SHA512_RSA_PKCS:
+        *out = TSRA_ALGO_ID_RSA_PKCS_SHA512;
+        return true;
+    case CKM_RSA_PKCS_PSS:
+        *out = TSRA_ALGO_ID_RSA_PKCS_PSS;
+        return true;
+    case CKM_SHA1_RSA_PKCS_PSS:
+        *out = TSRA_ALGO_ID_RSA_PKCS_PSS_SHA1;
+        return true;
+    case CKM_SHA256_RSA_PKCS_PSS:
+        *out = TSRA_ALGO_ID_RSA_PKCS_PSS_SHA256;
+        return true;
+    case CKM_SHA384_RSA_PKCS_PSS:
+        *out = TSRA_ALGO_ID_RSA_PKCS_PSS_SHA384;
+        return true;
+    case CKM_SHA512_RSA_PKCS_PSS:
+        *out = TSRA_ALGO_ID_RSA_PKCS_PSS_SHA512;
+        return true;
     default:
         return false;
     }
 }
 
+/*
+ * The SDK algorithm of the sign mechanism `mech` into *algo, with the PSS
+ * parameters `pss` (NULL for a mechanism without them) translated into
+ * *params, which *algo then points at. The SDK runs MGF1 with the signature
+ * hash whatever the mgf id says; tsra_pkcs11_sign_params_check has made the
+ * caller's mgf that one. false for an unknown mechanism, hash or a salt
+ * beyond 32 bits.
+ */
+static bool sign_algo_params(
+    CK_MECHANISM_TYPE mech,
+    const CK_RSA_PKCS_PSS_PARAMS *pss,
+    struct tsra_algo_rsa_pkcs_pss_params *params,
+    struct tsra_algo *algo
+)
+{
+    uint32_t id = 0;
+    if (!sign_algo(mech, &id))
+    {
+        return false;
+    }
+    *algo = (struct tsra_algo){ id, NULL, 0 };
+    if (pss == NULL)
+    {
+        return true;
+    }
+    uint32_t hash = 0;
+    uint32_t mgf1 = 0;
+    if (!hash_ids(pss->hashAlg, &hash, &mgf1) || (pss->sLen > (CK_ULONG)UINT32_MAX))
+    {
+        return false;
+    }
+    *params = (struct tsra_algo_rsa_pkcs_pss_params){ hash, mgf1, (uint32_t)pss->sLen };
+    *algo = (struct tsra_algo){ id, params, sizeof(*params) };
+    return true;
+}
+
 CK_RV tsra_pkcs11_key_sign(
     CK_MECHANISM_TYPE mech,
+    const CK_RSA_PKCS_PSS_PARAMS *pss,
     uint32_t key_handle,
     const CK_BYTE *in,
     CK_ULONG in_len,
@@ -935,9 +1178,10 @@ CK_RV tsra_pkcs11_key_sign(
     CK_ULONG *sig_len
 )
 {
-    uint32_t id = 0;
+    struct tsra_algo_rsa_pkcs_pss_params params;
+    struct tsra_algo algo;
     if ((sig == NULL) || (sig_len == NULL) || ((in == NULL) && (in_len > 0)) ||
-        (in_len > (CK_ULONG)UINT32_MAX) || !sign_algo(mech, &id))
+        (in_len > (CK_ULONG)UINT32_MAX) || !sign_algo_params(mech, pss, &params, &algo))
     {
         return CKR_ARGUMENTS_BAD;
     }
@@ -948,7 +1192,6 @@ CK_RV tsra_pkcs11_key_sign(
     {
         return rv;
     }
-    struct tsra_algo algo = { id, NULL, 0 };
     struct tsra_buffer inbuf = { (staged != NULL) ? staged : (void *)in, (uint32_t)in_len };
     struct tsra_buffer sigbuf = { sig, cap };
     tsra_status st = tsra_crypt_sign(&algo, key_handle, &inbuf, &sigbuf);
@@ -960,7 +1203,7 @@ CK_RV tsra_pkcs11_key_sign(
     }
     if (st != TSRA_STATUS_SUCCESS)
     {
-        TSRA_PKCS11_LOG("crypt_sign(algo %u) failed: %d", id, (int)st);
+        TSRA_PKCS11_LOG("crypt_sign(algo %u) failed: %d", algo.id, (int)st);
         return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_KEY_HANDLE_INVALID);
     }
     *sig_len = sigbuf.len;
@@ -985,6 +1228,7 @@ static CK_RV verify_status(tsra_status st, CK_RV invalid_handle)
 
 CK_RV tsra_pkcs11_key_verify(
     CK_MECHANISM_TYPE mech,
+    const CK_RSA_PKCS_PSS_PARAMS *pss,
     uint32_t key_handle,
     const CK_BYTE *in,
     CK_ULONG in_len,
@@ -992,20 +1236,20 @@ CK_RV tsra_pkcs11_key_verify(
     CK_ULONG sig_len
 )
 {
-    uint32_t id = 0;
+    struct tsra_algo_rsa_pkcs_pss_params params;
+    struct tsra_algo algo;
     if (((in == NULL) && (in_len > 0)) || ((sig == NULL) && (sig_len > 0)) ||
         (in_len > (CK_ULONG)UINT32_MAX) || (sig_len > (CK_ULONG)UINT32_MAX) ||
-        !sign_algo(mech, &id))
+        !sign_algo_params(mech, pss, &params, &algo))
     {
         return CKR_ARGUMENTS_BAD;
     }
-    struct tsra_algo algo = { id, NULL, 0 };
     struct tsra_buffer inbuf = { (void *)in, (uint32_t)in_len };
     struct tsra_buffer sigbuf = { (void *)sig, (uint32_t)sig_len };
     tsra_status st = tsra_crypt_verify(&algo, key_handle, &inbuf, &sigbuf);
     if (st != TSRA_STATUS_SUCCESS)
     {
-        TSRA_PKCS11_LOG("crypt_verify(algo %u): %d", id, (int)st);
+        TSRA_PKCS11_LOG("crypt_verify(algo %u): %d", algo.id, (int)st);
         return verify_status(st, CKR_KEY_HANDLE_INVALID);
     }
     return CKR_OK;
@@ -1014,23 +1258,29 @@ CK_RV tsra_pkcs11_key_verify(
 CK_RV tsra_pkcs11_key_sign_stream_new(
     bool sign,
     CK_MECHANISM_TYPE mech,
+    const CK_RSA_PKCS_PSS_PARAMS *pss,
     uint32_t key_handle,
     uint32_t *out_ctx
 )
 {
-    uint32_t id = 0;
-    if ((out_ctx == NULL) || !sign_algo(mech, &id))
+    struct tsra_algo_rsa_pkcs_pss_params params;
+    struct tsra_algo algo;
+    if ((out_ctx == NULL) || !sign_algo_params(mech, pss, &params, &algo))
     {
         return CKR_ARGUMENTS_BAD;
     }
     *out_ctx = 0;
-    struct tsra_algo algo = { id, NULL, 0 };
     tsra_handle ctx = 0;
     tsra_status st = sign ? tsra_crypt_sign_init(&algo, key_handle, &ctx)
                           : tsra_crypt_verify_init(&algo, key_handle, &ctx);
     if (st != TSRA_STATUS_SUCCESS)
     {
-        TSRA_PKCS11_LOG("crypt_%s_init(algo %u) failed: %d", sign ? "sign" : "verify", id, (int)st);
+        TSRA_PKCS11_LOG(
+            "crypt_%s_init(algo %u) failed: %d",
+            sign ? "sign" : "verify",
+            algo.id,
+            (int)st
+        );
         return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_KEY_HANDLE_INVALID);
     }
     *out_ctx = ctx;
@@ -1106,6 +1356,275 @@ void tsra_pkcs11_key_sign_stream_free(uint32_t ctx)
     {
         (void)tsra_free_ctx_handle(ctx);
     }
+}
+
+CK_RV tsra_pkcs11_key_rsa_oaep(
+    bool encrypt,
+    uint32_t key_handle,
+    CK_MECHANISM_TYPE hash,
+    const CK_BYTE *label,
+    CK_ULONG label_len,
+    const CK_BYTE *in,
+    CK_ULONG in_len,
+    CK_BYTE *out,
+    CK_ULONG *out_len
+)
+{
+    uint32_t hash_id = 0;
+    uint32_t mgf1 = 0;
+    if ((out == NULL) || (out_len == NULL) || ((in == NULL) && (in_len > 0)) ||
+        ((label == NULL) && (label_len > 0)) || (in_len > (CK_ULONG)UINT32_MAX) ||
+        (label_len > (CK_ULONG)UINT32_MAX) || (hash == CKM_SHA_1) ||
+        !hash_ids(hash, &hash_id, &mgf1))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    uint32_t cap = (*out_len > (CK_ULONG)UINT32_MAX) ? UINT32_MAX : (uint32_t)*out_len;
+    CK_BYTE *staged = NULL;
+    CK_RV rv = stage_overlap(in, in_len, out, cap, &staged);
+    if (rv != CKR_OK)
+    {
+        return rv;
+    }
+    struct tsra_buffer label_buf = { (void *)label, (uint32_t)label_len };
+    struct tsra_algo_rsa_pkcs_oaep_params params = { hash_id,
+                                                     mgf1,
+                                                     (label_len > 0) ? &label_buf : NULL };
+    struct tsra_algo algo = { TSRA_ALGO_ID_RSA_PKCS_OAEP, &params, sizeof(params) };
+    struct tsra_buffer inbuf = { (staged != NULL) ? staged : (void *)in, (uint32_t)in_len };
+    struct tsra_buffer outbuf = { out, cap };
+    tsra_status st = encrypt ? tsra_crypt_encrypt(&algo, key_handle, &inbuf, &outbuf)
+                             : tsra_crypt_decrypt(&algo, key_handle, &inbuf, &outbuf);
+    stage_free(staged, in_len);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("crypt_%s(OAEP) failed: %d", encrypt ? "encrypt" : "decrypt", (int)st);
+        /* A decrypt answers one code for every status, not
+         * tsra_pkcs11_ckr_from_tsra_hint: a caller who can tell a bad
+         * padding from a bad label or block holds a padding oracle. */
+        return encrypt ? tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_KEY_HANDLE_INVALID)
+                       : CKR_ENCRYPTED_DATA_INVALID;
+    }
+    *out_len = outbuf.len;
+    return CKR_OK;
+}
+
+CK_RV tsra_pkcs11_key_ecdh(
+    uint32_t hsm_session,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    tsra_pkcs11_ec_curve_t curve,
+    const CK_BYTE *peer,
+    CK_ULONG peer_len,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+)
+{
+    CK_ULONG bits = tsra_pkcs11_ec_curve_bits(curve);
+    if ((out_blob == NULL) || (out_blob_len == NULL) || (peer == NULL) || (peer_len == 0) ||
+        (peer_len > (CK_ULONG)UINT32_MAX) || (bits == 0) || !scope_ok(scope))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    *out_blob = NULL;
+    *out_blob_len = 0;
+    uint32_t priv = 0;
+    uint32_t pub = 0;
+    tsra_pkcs11_ec_curve_t dev_curve = TSRA_PKCS11_CURVE_NONE;
+    CK_RV rv = tsra_pkcs11_key_ec_unmask(hsm_session, blob, blob_len, &priv, &pub, &dev_curve);
+    if (rv != CKR_OK)
+    {
+        return rv;
+    }
+    if (dev_curve != curve)
+    {
+        /* The peer point was checked against the object's CKA_EC_PARAMS. */
+        TSRA_PKCS11_LOG(
+            "ECDH: the key is on curve %d, its object names %d",
+            (int)dev_curve,
+            (int)curve
+        );
+        rv = CKR_KEY_HANDLE_INVALID;
+        goto cleanup;
+    }
+
+    /* The SDK takes only this shape for an ECDH secret: a shared-secret key as
+     * long as the curve that only derives (api/lib HsmGenericSecretKey). */
+    uint32_t cls = TSRA_KEY_CLASS_SECRET;
+    uint32_t kind = TSRA_KEY_KIND_SHARED_SECRET;
+    uint32_t bit_len = (uint32_t)bits; /* at most EC_P521_BITS (tsra_pkcs11_ec_curve_bits) */
+    uint8_t yes = 1;
+    uint8_t session = (scope == TSRA_PKCS11_SCOPE_SESSION) ? 1 : 0;
+    struct tsra_key_prop props[] = {
+        { TSRA_KEY_PROP_ID_CLASS, &cls, sizeof(cls) },
+        { TSRA_KEY_PROP_ID_KIND, &kind, sizeof(kind) },
+        { TSRA_KEY_PROP_ID_BIT_LEN, &bit_len, sizeof(bit_len) },
+        { TSRA_KEY_PROP_ID_SESSION, &session, sizeof(session) },
+        { TSRA_KEY_PROP_ID_DERIVE, &yes, sizeof(yes) },
+    };
+    struct tsra_key_prop_list list = { props, sizeof(props) / sizeof(props[0]) };
+    struct tsra_buffer peer_buf = { (void *)peer, (uint32_t)peer_len };
+    struct tsra_algo_ecdh_params params = { &peer_buf };
+    struct tsra_algo algo = { TSRA_ALGO_ID_ECDH, &params, sizeof(params) };
+    tsra_handle secret = 0;
+    tsra_status st = tsra_key_derive(hsm_session, &algo, priv, &list, &secret);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("key_derive(ECDH, curve %d) failed: %d", (int)curve, (int)st);
+        /* INVALID_KEY here is the SDK refusing the peer key, a point that is
+         * not on the curve: the base key's curve is checked above and its
+         * derive usage by the object policy, the other two causes. */
+        rv = (st == TSRA_STATUS_INVALID_KEY)
+                 ? CKR_MECHANISM_PARAM_INVALID
+                 : tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_KEY_HANDLE_INVALID);
+        goto cleanup;
+    }
+    rv = get_prop_alloc(secret, TSRA_KEY_PROP_ID_MASKED_KEY, out_blob, out_blob_len);
+    (void)tsra_key_delete(secret);
+
+cleanup:
+    tsra_pkcs11_key_release(priv);
+    tsra_pkcs11_key_release(pub);
+    return rv;
+}
+
+/*
+ * The device kind and the two usages (which the SDK requires both of) of a
+ * key HKDF derives; false for a kind it does not derive into. The SDK's AES
+ * output is the CBC kind only (api/lib HsmGenericSecretKey).
+ */
+static bool hkdf_target(
+    tsra_pkcs11_key_kind_t kind,
+    uint32_t *dev_kind,
+    uint32_t *use_a,
+    uint32_t *use_b
+)
+{
+    *use_a = TSRA_KEY_PROP_ID_SIGN;
+    *use_b = TSRA_KEY_PROP_ID_VERIFY;
+    switch (kind)
+    {
+    case TSRA_PKCS11_KIND_AES:
+        *dev_kind = TSRA_KEY_KIND_AES;
+        *use_a = TSRA_KEY_PROP_ID_ENCRYPT;
+        *use_b = TSRA_KEY_PROP_ID_DECRYPT;
+        return true;
+    case TSRA_PKCS11_KIND_HMAC_SHA256:
+        *dev_kind = TSRA_KEY_KIND_HMAC_SHA256;
+        return true;
+    case TSRA_PKCS11_KIND_HMAC_SHA384:
+        *dev_kind = TSRA_KEY_KIND_HMAC_SHA384;
+        return true;
+    case TSRA_PKCS11_KIND_HMAC_SHA512:
+        *dev_kind = TSRA_KEY_KIND_HMAC_SHA512;
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* The SDK's HMAC for an HKDF PRF tsra_pkcs11_derive_params_check accepted;
+ * false for any other. */
+static bool hkdf_prf(CK_MECHANISM_TYPE prf, uint32_t *out)
+{
+    switch (prf)
+    {
+    case CKM_SHA256:
+        *out = TSRA_ALGO_ID_HMAC_SHA256;
+        return true;
+    case CKM_SHA384:
+        *out = TSRA_ALGO_ID_HMAC_SHA384;
+        return true;
+    case CKM_SHA512:
+        *out = TSRA_ALGO_ID_HMAC_SHA512;
+        return true;
+    default:
+        return false;
+    }
+}
+
+CK_RV tsra_pkcs11_key_hkdf(
+    uint32_t hsm_session,
+    const CK_BYTE *secret,
+    CK_ULONG secret_len,
+    CK_MECHANISM_TYPE prf,
+    const CK_BYTE *salt,
+    CK_ULONG salt_len,
+    const CK_BYTE *info,
+    CK_ULONG info_len,
+    tsra_pkcs11_key_kind_t kind,
+    uint32_t bit_len,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+)
+{
+    uint32_t dev_kind = 0;
+    uint32_t use_a = 0;
+    uint32_t use_b = 0;
+    uint32_t hmac = 0;
+    if ((out_blob == NULL) || (out_blob_len == NULL) || (secret == NULL) || (secret_len == 0) ||
+        (secret_len > (CK_ULONG)UINT32_MAX) || ((salt == NULL) && (salt_len > 0)) ||
+        ((info == NULL) && (info_len > 0)) || (salt_len > (CK_ULONG)UINT32_MAX) ||
+        (info_len > (CK_ULONG)UINT32_MAX) || !scope_ok(scope) ||
+        !hkdf_target(kind, &dev_kind, &use_a, &use_b) || !hkdf_prf(prf, &hmac))
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+    *out_blob = NULL;
+    *out_blob_len = 0;
+    struct tsra_buffer masked = { (void *)secret, (uint32_t)secret_len };
+    tsra_handle base = 0;
+    tsra_status st = tsra_key_unmask(hsm_session, TSRA_KEY_KIND_SHARED_SECRET, &masked, &base);
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG("key_unmask(shared secret) failed: %d", (int)st);
+        /* As for AES: the only handle passed is the device session. */
+        return tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_USER_NOT_LOGGED_IN);
+    }
+
+    uint32_t cls = TSRA_KEY_CLASS_SECRET;
+    uint8_t yes = 1;
+    uint8_t session = (scope == TSRA_PKCS11_SCOPE_SESSION) ? 1 : 0;
+    struct tsra_key_prop props[] = {
+        { TSRA_KEY_PROP_ID_CLASS, &cls, sizeof(cls) },
+        { TSRA_KEY_PROP_ID_KIND, &dev_kind, sizeof(dev_kind) },
+        { TSRA_KEY_PROP_ID_BIT_LEN, &bit_len, sizeof(bit_len) },
+        { TSRA_KEY_PROP_ID_SESSION, &session, sizeof(session) },
+        { use_a, &yes, sizeof(yes) },
+        { use_b, &yes, sizeof(yes) },
+    };
+    struct tsra_key_prop_list list = { props, sizeof(props) / sizeof(props[0]) };
+    /* None rather than empty: HKDF reads an absent salt as hash-length zeros,
+     * which key HMAC exactly as an empty one does, and an absent info as an
+     * empty one (RFC 5869). */
+    struct tsra_buffer salt_buf = { (void *)salt, (uint32_t)salt_len };
+    struct tsra_buffer info_buf = { (void *)info, (uint32_t)info_len };
+    struct tsra_algo_hkdf_params params = { hmac,
+                                            (salt_len > 0) ? &salt_buf : NULL,
+                                            (info_len > 0) ? &info_buf : NULL };
+    struct tsra_algo algo = { TSRA_ALGO_ID_HKDF_DERIVE, &params, sizeof(params) };
+    tsra_handle key = 0;
+    st = tsra_key_derive(hsm_session, &algo, base, &list, &key);
+    CK_RV rv = CKR_OK;
+    if (st != TSRA_STATUS_SUCCESS)
+    {
+        TSRA_PKCS11_LOG(
+            "key_derive(HKDF, kind %u, %u bits) failed: %d",
+            dev_kind,
+            bit_len,
+            (int)st
+        );
+        rv = tsra_pkcs11_ckr_from_tsra_hint((int)st, CKR_KEY_HANDLE_INVALID);
+    }
+    else
+    {
+        rv = get_prop_alloc(key, TSRA_KEY_PROP_ID_MASKED_KEY, out_blob, out_blob_len);
+        (void)tsra_key_delete(key);
+    }
+    tsra_pkcs11_key_release(base);
+    return rv;
 }
 
 #else /* !TSRA_WITH_HSM ---------------------------------------------------- */
@@ -1351,6 +1870,7 @@ CK_RV tsra_pkcs11_key_ec_unmask(
 
 CK_RV tsra_pkcs11_key_sign(
     CK_MECHANISM_TYPE mech,
+    const CK_RSA_PKCS_PSS_PARAMS *pss,
     uint32_t key_handle,
     const CK_BYTE *in,
     CK_ULONG in_len,
@@ -1359,6 +1879,7 @@ CK_RV tsra_pkcs11_key_sign(
 )
 {
     (void)mech;
+    (void)pss;
     (void)key_handle;
     (void)in;
     (void)in_len;
@@ -1369,6 +1890,7 @@ CK_RV tsra_pkcs11_key_sign(
 
 CK_RV tsra_pkcs11_key_verify(
     CK_MECHANISM_TYPE mech,
+    const CK_RSA_PKCS_PSS_PARAMS *pss,
     uint32_t key_handle,
     const CK_BYTE *in,
     CK_ULONG in_len,
@@ -1377,6 +1899,7 @@ CK_RV tsra_pkcs11_key_verify(
 )
 {
     (void)mech;
+    (void)pss;
     (void)key_handle;
     (void)in;
     (void)in_len;
@@ -1388,12 +1911,14 @@ CK_RV tsra_pkcs11_key_verify(
 CK_RV tsra_pkcs11_key_sign_stream_new(
     bool sign,
     CK_MECHANISM_TYPE mech,
+    const CK_RSA_PKCS_PSS_PARAMS *pss,
     uint32_t key_handle,
     uint32_t *out_ctx
 )
 {
     (void)sign;
     (void)mech;
+    (void)pss;
     (void)key_handle;
     (void)out_ctx;
     return CKR_FUNCTION_NOT_SUPPORTED;
@@ -1432,6 +1957,138 @@ CK_RV tsra_pkcs11_key_verify_stream_final(uint32_t ctx, const CK_BYTE *sig, CK_U
 void tsra_pkcs11_key_sign_stream_free(uint32_t ctx)
 {
     (void)ctx; /* no context can exist without a device */
+}
+
+CK_RV tsra_pkcs11_key_ecdh(
+    uint32_t hsm_session,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    tsra_pkcs11_ec_curve_t curve,
+    const CK_BYTE *peer,
+    CK_ULONG peer_len,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+)
+{
+    (void)hsm_session;
+    (void)blob;
+    (void)blob_len;
+    (void)curve;
+    (void)peer;
+    (void)peer_len;
+    (void)scope;
+    (void)out_blob;
+    (void)out_blob_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV tsra_pkcs11_key_hkdf(
+    uint32_t hsm_session,
+    const CK_BYTE *secret,
+    CK_ULONG secret_len,
+    CK_MECHANISM_TYPE prf,
+    const CK_BYTE *salt,
+    CK_ULONG salt_len,
+    const CK_BYTE *info,
+    CK_ULONG info_len,
+    tsra_pkcs11_key_kind_t kind,
+    uint32_t bit_len,
+    tsra_pkcs11_key_scope_t scope,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len
+)
+{
+    (void)hsm_session;
+    (void)secret;
+    (void)secret_len;
+    (void)prf;
+    (void)salt;
+    (void)salt_len;
+    (void)info;
+    (void)info_len;
+    (void)kind;
+    (void)bit_len;
+    (void)scope;
+    (void)out_blob;
+    (void)out_blob_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV tsra_pkcs11_key_pair_unwrap(
+    uint32_t unwrapping_key,
+    CK_MECHANISM_TYPE oaep_hash,
+    CK_ULONG aes_key_bits,
+    CK_KEY_TYPE key_type,
+    CK_ULONG rsa_bits,
+    tsra_pkcs11_ec_curve_t curve,
+    CK_ATTRIBUTE_TYPE usage,
+    tsra_pkcs11_key_scope_t scope,
+    const CK_BYTE *wrapped,
+    CK_ULONG wrapped_len,
+    CK_BYTE **out_blob,
+    CK_ULONG *out_blob_len,
+    CK_BYTE **out_spki,
+    CK_ULONG *out_spki_len
+)
+{
+    (void)unwrapping_key;
+    (void)oaep_hash;
+    (void)aes_key_bits;
+    (void)key_type;
+    (void)rsa_bits;
+    (void)curve;
+    (void)usage;
+    (void)scope;
+    (void)wrapped;
+    (void)wrapped_len;
+    (void)out_blob;
+    (void)out_blob_len;
+    (void)out_spki;
+    (void)out_spki_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV tsra_pkcs11_key_rsa_unmask(
+    uint32_t hsm_session,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    uint32_t *out_priv,
+    uint32_t *out_pub,
+    CK_ULONG *out_bits
+)
+{
+    (void)hsm_session;
+    (void)blob;
+    (void)blob_len;
+    (void)out_priv;
+    (void)out_pub;
+    (void)out_bits;
+    return CKR_FUNCTION_NOT_SUPPORTED;
+}
+
+CK_RV tsra_pkcs11_key_rsa_oaep(
+    bool encrypt,
+    uint32_t key_handle,
+    CK_MECHANISM_TYPE hash,
+    const CK_BYTE *label,
+    CK_ULONG label_len,
+    const CK_BYTE *in,
+    CK_ULONG in_len,
+    CK_BYTE *out,
+    CK_ULONG *out_len
+)
+{
+    (void)encrypt;
+    (void)key_handle;
+    (void)hash;
+    (void)label;
+    (void)label_len;
+    (void)in;
+    (void)in_len;
+    (void)out;
+    (void)out_len;
+    return CKR_FUNCTION_NOT_SUPPORTED;
 }
 
 #endif /* TSRA_WITH_HSM */

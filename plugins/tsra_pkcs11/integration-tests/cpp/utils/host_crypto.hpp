@@ -281,8 +281,15 @@ inline Pkey rsa_public(const Bytes &n, const Bytes &e)
 }
 
 /// Sign msg hashed with md under PKCS#1 v1.5 (padding RSA_PKCS1_PADDING) or
-/// PSS (RSA_PKCS1_PSS_PADDING: MGF1 with md, salt as long as the digest).
-inline Bytes rsa_sign(EVP_PKEY *key, const char *md, int padding, const Bytes &msg)
+/// PSS (RSA_PKCS1_PSS_PADDING: MGF1 with md, a salt of `salt` bytes, as long
+/// as the digest by default).
+inline Bytes rsa_sign(
+    EVP_PKEY *key,
+    const char *md,
+    int padding,
+    const Bytes &msg,
+    int salt = RSA_PSS_SALTLEN_DIGEST
+)
 {
     Owned<EVP_MD_CTX, EVP_MD_CTX_free> ctx(EVP_MD_CTX_new());
     EVP_PKEY_CTX *pctx = nullptr; /* owned by ctx */
@@ -290,8 +297,8 @@ inline Bytes rsa_sign(EVP_PKEY *key, const char *md, int padding, const Bytes &m
     if (!ctx ||
         (EVP_DigestSignInit_ex(ctx.get(), &pctx, md, libctx(), nullptr, key, nullptr) != 1) ||
         (EVP_PKEY_CTX_set_rsa_padding(pctx, padding) != 1) ||
-        ((padding == RSA_PKCS1_PSS_PADDING) &&
-         (EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, RSA_PSS_SALTLEN_DIGEST) != 1)) ||
+        ((padding == RSA_PKCS1_PSS_PADDING) && (EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, salt) != 1)
+        ) ||
         (EVP_DigestSign(ctx.get(), nullptr, &len, msg.data(), msg.size()) != 1))
     {
         fail("RSA sign");
@@ -311,7 +318,8 @@ inline bool rsa_verify(
     const char *md,
     int padding,
     const Bytes &msg,
-    const Bytes &sig
+    const Bytes &sig,
+    int salt = RSA_PSS_SALTLEN_DIGEST
 )
 {
     Owned<EVP_MD_CTX, EVP_MD_CTX_free> ctx(EVP_MD_CTX_new());
@@ -319,14 +327,100 @@ inline bool rsa_verify(
     if (!ctx ||
         (EVP_DigestVerifyInit_ex(ctx.get(), &pctx, md, libctx(), nullptr, key, nullptr) != 1) ||
         (EVP_PKEY_CTX_set_rsa_padding(pctx, padding) != 1) ||
-        ((padding == RSA_PKCS1_PSS_PADDING) &&
-         (EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, RSA_PSS_SALTLEN_DIGEST) != 1)))
+        ((padding == RSA_PKCS1_PSS_PADDING) && (EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, salt) != 1)))
     {
         fail("RSA verify");
     }
     bool ok = EVP_DigestVerify(ctx.get(), sig.data(), sig.size(), msg.data(), msg.size()) == 1;
     ERR_clear_error();
     return ok;
+}
+
+/// The digest of msg with md ("SHA256", ...).
+inline Bytes digest(const char *md, const Bytes &msg)
+{
+    Owned<EVP_MD, EVP_MD_free> m(EVP_MD_fetch(libctx(), md, nullptr));
+    Bytes out(EVP_MAX_MD_SIZE);
+    unsigned int len = 0;
+    if (!m || (EVP_Digest(msg.data(), msg.size(), out.data(), &len, m.get(), nullptr) != 1))
+    {
+        fail(md);
+    }
+    out.resize(len);
+    return out;
+}
+
+/// An RSA-PSS signature over a digest made with md (MGF1 with md, a salt of
+/// `salt` bytes): what CKM_RSA_PKCS_PSS signs.
+inline Bytes rsa_pss_sign_digest(EVP_PKEY *key, const char *md, const Bytes &dgst, int salt)
+{
+    Owned<EVP_PKEY_CTX, EVP_PKEY_CTX_free> ctx(EVP_PKEY_CTX_new_from_pkey(libctx(), key, nullptr));
+    Owned<EVP_MD, EVP_MD_free> m(EVP_MD_fetch(libctx(), md, nullptr));
+    size_t len = 0;
+    if (!ctx || !m || (EVP_PKEY_sign_init(ctx.get()) != 1) ||
+        (EVP_PKEY_CTX_set_rsa_padding(ctx.get(), RSA_PKCS1_PSS_PADDING) != 1) ||
+        (EVP_PKEY_CTX_set_signature_md(ctx.get(), m.get()) != 1) ||
+        (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx.get(), salt) != 1) ||
+        (EVP_PKEY_sign(ctx.get(), nullptr, &len, dgst.data(), dgst.size()) != 1))
+    {
+        fail("RSA-PSS sign");
+    }
+    Bytes sig(len);
+    if (EVP_PKEY_sign(ctx.get(), sig.data(), &len, dgst.data(), dgst.size()) != 1)
+    {
+        fail("RSA-PSS sign");
+    }
+    sig.resize(len);
+    return sig;
+}
+
+/// Verify a signature rsa_pss_sign_digest() makes.
+inline bool rsa_pss_verify_digest(
+    EVP_PKEY *key,
+    const char *md,
+    const Bytes &dgst,
+    const Bytes &sig,
+    int salt
+)
+{
+    Owned<EVP_PKEY_CTX, EVP_PKEY_CTX_free> ctx(EVP_PKEY_CTX_new_from_pkey(libctx(), key, nullptr));
+    Owned<EVP_MD, EVP_MD_free> m(EVP_MD_fetch(libctx(), md, nullptr));
+    if (!ctx || !m || (EVP_PKEY_verify_init(ctx.get()) != 1) ||
+        (EVP_PKEY_CTX_set_rsa_padding(ctx.get(), RSA_PKCS1_PSS_PADDING) != 1) ||
+        (EVP_PKEY_CTX_set_signature_md(ctx.get(), m.get()) != 1) ||
+        (EVP_PKEY_CTX_set_rsa_pss_saltlen(ctx.get(), salt) != 1))
+    {
+        fail("RSA-PSS verify");
+    }
+    bool ok = EVP_PKEY_verify(ctx.get(), sig.data(), sig.size(), dgst.data(), dgst.size()) == 1;
+    ERR_clear_error();
+    return ok;
+}
+
+/// A big-number parameter of a key (OSSL_PKEY_PARAM_RSA_N, ...), big-endian
+/// without leading zeros, as CKA_MODULUS carries it.
+inline Bytes bn_param(EVP_PKEY *key, const char *name)
+{
+    BIGNUM *bn = nullptr;
+    if (EVP_PKEY_get_bn_param(key, name, &bn) != 1)
+    {
+        fail(name);
+    }
+    Owned<BIGNUM, BN_free> owned(bn);
+    Bytes out(static_cast<size_t>(BN_num_bytes(bn)));
+    BN_bn2bin(bn, out.data());
+    return out;
+}
+
+/// A fresh RSA key pair of `bits` bits with the public exponent 65537.
+inline Pkey rsa_generate(size_t bits)
+{
+    Pkey key(EVP_PKEY_Q_keygen(libctx(), nullptr, "RSA", bits));
+    if (!key)
+    {
+        fail("RSA key generation");
+    }
+    return key;
 }
 
 /// RSA-OAEP with md as the OAEP and the MGF1 hash (the only form the SDK takes)

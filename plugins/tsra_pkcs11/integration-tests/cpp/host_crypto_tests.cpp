@@ -6,8 +6,9 @@
 /// The host oracle (utils/host_crypto.hpp) against published vectors, so a
 /// module test that relies on it relies on OpenSSL and the vectors, not on new
 /// code: RFC 4231 (HMAC), RFC 5869 (HKDF), NIST CAVP (AES-CBC, ECDH, RSA
-/// PKCS#1 v1.5 and PSS signatures), RFC 5649 and Wycheproof (AES key wrap with
-/// padding, every KEK size), RFC 6979 (ECDSA) and BoringSSL (RSA-OAEP).
+/// PKCS#1 v1.5 and PSS signatures, PSS also over a digest and with its salt
+/// length; SHA-256), RFC 5649 and Wycheproof (AES key wrap with padding, every
+/// KEK size), RFC 6979 (ECDSA) and BoringSSL (RSA-OAEP).
 /// Hand-built cases check that bad padding, a bad key wrap, a point off the
 /// curve and a tampered OAEP ciphertext are refused. Each case runs in a
 /// process that has the module loaded; the coexistence case also uses a token
@@ -384,6 +385,45 @@ TEST(host_crypto, rsa_pss_matches_nist)
     EXPECT_NE(s1, s2);
     EXPECT_TRUE(host::rsa_verify(key.get(), "SHA384", RSA_PKCS1_PSS_PADDING, text("message"), s1));
     EXPECT_FALSE(host::rsa_verify(key.get(), "SHA384", RSA_PKCS1_PADDING, text("message"), s1));
+}
+
+TEST(host_crypto, rsa_pss_over_a_digest_and_with_a_salt_length_matches_nist)
+{
+    for (const auto &v : vectors::kRsaPssNist)
+    {
+        host::Pkey pub = host::rsa_public(hex(v.key->n), hex(v.key->e));
+        Bytes dgst = host::digest(v.md, hex(v.msg));
+        int salt = static_cast<int>(dgst.size()); /* the vectors salt with the hash length */
+        EXPECT_TRUE(host::rsa_pss_verify_digest(pub.get(), v.md, dgst, hex(v.sig), salt)) << v.sig;
+        EXPECT_TRUE(
+            host::rsa_verify(pub.get(), v.md, RSA_PKCS1_PSS_PADDING, hex(v.msg), hex(v.sig), salt)
+        ) << v.sig;
+        EXPECT_FALSE(host::rsa_pss_verify_digest(pub.get(), v.md, dgst, hex(v.sig), salt - 1))
+            << "another salt length";
+    }
+    // A signature over a digest is the signature over its message.
+    host::Pkey key = host::private_key(hex(vectors::kRsaPssKey0.pkcs8));
+    Bytes msg = text("message");
+    Bytes sig = host::rsa_pss_sign_digest(key.get(), "SHA256", host::digest("SHA256", msg), 0);
+    EXPECT_TRUE(host::rsa_verify(key.get(), "SHA256", RSA_PKCS1_PSS_PADDING, msg, sig, 0));
+    EXPECT_FALSE(host::rsa_verify(key.get(), "SHA256", RSA_PKCS1_PSS_PADDING, msg, sig));
+}
+
+TEST(host_crypto, digest_and_rsa_generation)
+{
+    // FIPS 180-2 appendix B.1: SHA-256 of "abc".
+    EXPECT_EQ(
+        hex("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+        host::digest("SHA256", text("abc"))
+    );
+    host::Pkey key = host::rsa_generate(2048);
+    EXPECT_EQ(2048, EVP_PKEY_get_bits(key.get()));
+    EXPECT_EQ(hex("010001"), host::bn_param(key.get(), OSSL_PKEY_PARAM_RSA_E));
+    host::Pkey again = host::private_key(host::pkcs8(key.get()));
+    EXPECT_EQ(
+        host::bn_param(key.get(), OSSL_PKEY_PARAM_RSA_N),
+        host::bn_param(again.get(), OSSL_PKEY_PARAM_RSA_N)
+    ) << "the PKCS#8 encoding round-trips";
 }
 
 TEST(host_crypto, rsa_oaep_matches_boringssl)

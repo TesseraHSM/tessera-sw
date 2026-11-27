@@ -33,9 +33,17 @@ typedef enum
     TSRA_PKCS11_CURVE_P521 = 3,
 } tsra_pkcs11_ec_curve_t;
 
+/* The size of each curve in bits, which is also the size of its ECDH secret. */
+#define EC_P256_BITS 256
+#define EC_P384_BITS 384
+#define EC_P521_BITS 521
+
 /* The EC key sizes in bits the mechanism table reports (P-256 to P-521). */
-#define EC_MIN_KEY_BITS 256
-#define EC_MAX_KEY_BITS 521
+#define EC_MIN_KEY_BITS EC_P256_BITS
+#define EC_MAX_KEY_BITS EC_P521_BITS
+
+/* The first byte of an uncompressed point (SEC 1). */
+#define EC_POINT_UNCOMPRESSED 0x04
 
 /* The capabilities every EC mechanism row reports: curves over a prime field,
  * named by OID in CKA_EC_PARAMS, with uncompressed points. */
@@ -44,6 +52,17 @@ typedef enum
 /* The longest CKA_EC_POINT: a DER OCTET STRING (tag, two length bytes) around
  * the uncompressed P-521 point. */
 #define EC_POINT_DER_MAX (3 + 1 + (2 * 66))
+
+/* The longest CKA_EC_PARAMS of a supported curve: the DER OID of P-256. */
+#define EC_PARAMS_DER_MAX 10
+
+/*
+ * The longest DER SubjectPublicKeyInfo tsra_pkcs11_ec_spki_from_point writes:
+ * the outer SEQUENCE and the BIT STRING headers (three bytes each at most),
+ * the algorithm SEQUENCE header (two), the id-ecPublicKey OID (nine), the
+ * longest curve OID, the unused-bits byte and the uncompressed P-521 point.
+ */
+#define EC_SPKI_DER_MAX (3 + 3 + 2 + 9 + EC_PARAMS_DER_MAX + 1 + (EC_POINT_DER_MAX - 3))
 
 /*
  * The curve a CKA_EC_PARAMS value names. CKR_OK for the named-curve OID of
@@ -57,6 +76,56 @@ CK_RV tsra_pkcs11_ec_params_curve(const void *value, CK_ULONG len, tsra_pkcs11_e
 /* The byte length of one coordinate (and of r and of s) on `curve`; 0 for
  * any other value. */
 CK_ULONG tsra_pkcs11_ec_coord_len(tsra_pkcs11_ec_curve_t curve);
+
+/* The size of `curve` in bits (256, 384 or 521), which is also the size of
+ * its ECDH shared secret; 0 for any other value. */
+CK_ULONG tsra_pkcs11_ec_curve_bits(tsra_pkcs11_ec_curve_t curve);
+
+/* The CKA_EC_PARAMS value of `curve`, its DER named-curve OID, with its length
+ * in *len; NULL (and *len 0) for any other value. The bytes are static. */
+const CK_BYTE *tsra_pkcs11_ec_curve_params(tsra_pkcs11_ec_curve_t curve, CK_ULONG *len);
+
+/*
+ * The DER SubjectPublicKeyInfo (RFC 5480) of the public key whose uncompressed
+ * point on `curve` is `point`: the form the SDK takes an ECDH peer in. `out`
+ * has room for *out_len bytes (EC_SPKI_DER_MAX is always enough); on CKR_OK
+ * *out_len is the bytes written. CKR_BUFFER_TOO_SMALL with the length needed
+ * in *out_len when `out` is too short; CKR_ARGUMENTS_BAD for NULL arguments,
+ * no curve, or a point that is not an uncompressed one of the curve's length.
+ * Whether the point lies on the curve is the SDK's check.
+ */
+CK_RV tsra_pkcs11_ec_spki_from_point(
+    tsra_pkcs11_ec_curve_t curve,
+    const CK_BYTE *point,
+    CK_ULONG point_len,
+    CK_BYTE *out,
+    CK_ULONG *out_len
+);
+
+/*
+ * Whether a CKA_EC_POINT value is a point of `curve` as this token stores
+ * one: a DER OCTET STRING holding the uncompressed point, 0x04 then both
+ * coordinates. CKR_OK if so, else CKR_ATTRIBUTE_VALUE_INVALID: a NULL value,
+ * a `curve` the token does not support (TSRA_PKCS11_CURVE_NONE included), a
+ * bare point without the OCTET STRING, a compressed point, a length of
+ * another curve, or bytes after the string. Whether the point lies on the
+ * curve is not checked.
+ */
+CK_RV tsra_pkcs11_ec_point_check(const void *value, CK_ULONG len, tsra_pkcs11_ec_curve_t curve);
+
+/*
+ * The uncompressed point inside a CKA_EC_POINT value of `curve`, read by the
+ * rules of tsra_pkcs11_ec_point_check (minimal DER lengths only): true with
+ * *point at its first byte, EC_POINT_UNCOMPRESSED, when the check would pass;
+ * false otherwise, *point untouched. The point is 1 + 2 *
+ * tsra_pkcs11_ec_coord_len(curve) bytes and lies within `value`.
+ */
+bool tsra_pkcs11_ec_point_from_der(
+    const void *value,
+    CK_ULONG len,
+    tsra_pkcs11_ec_curve_t curve,
+    const CK_BYTE **point
+);
 
 /*
  * The CKA_EC_POINT value of an EC public key on `curve`, from the DER
